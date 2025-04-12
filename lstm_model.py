@@ -325,79 +325,52 @@ class DirectionAwareLoss(nn.Module):
 # Focal Loss变体，专注于难以预测的样本
 class FocalMSELoss(nn.Module):
     """
-    结合了方向预测的MSE损失，专注于难例并重点关注方向预测
+    结合MSE损失和方向预测损失的混合损失函数。
+    gamma控制困难样本的权重，direction_weight控制方向损失的权重。
     """
-    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.6): # !!! 降低方向权重 !!!
+    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.3): # 将方向权重降低到0.3
         super(FocalMSELoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
         self.direction_weight = direction_weight
-    
+        self.eps = 1e-6  # 添加平滑因子，防止数值不稳定
+
     def forward(self, pred, target):
         # 计算MSE
         mse = F.mse_loss(pred, target, reduction='none')
         
-        # 计算每个样本的权重（聚焦难以预测的样本）
-        weight = self.alpha * (1 - torch.exp(-mse)) ** self.gamma
-        focal_mse = weight * mse
+        # Focal权重 - 为难样本赋予更高权重
+        pt = torch.exp(-mse)
+        focal_weight = (1 - pt) ** self.gamma
         
-        # 计算方向损失部分
-        batch_size = pred.size(0)
+        # 应用focal weight到MSE
+        focal_loss = self.alpha * focal_weight * mse
+        focal_loss = focal_loss.mean()
         
-        # 初始化方向损失
-        direction_loss = torch.tensor(0.0, device=pred.device)
+        # 计算方向预测损失
+        # 添加平滑处理，避免极小值导致梯度不稳定
+        if pred.dim() > 2:  # 处理3D输入 (batch, seq, feature)
+            pred_diff = pred[:, 1:, :] - pred[:, :-1, :]
+            target_diff = target[:, 1:, :] - target[:, :-1, :]
+        else:  # 处理2D输入 (batch, feature)
+            pred_diff = pred[1:, :] - pred[:-1, :]
+            target_diff = target[1:, :] - target[:-1, :]
         
-        # 获取连续预测序列的方向
-        if len(pred.shape) > 2:  # 存在序列维度
-            batch_size, seq_len, _ = pred.shape
-            
-            # 如果序列长度大于1，计算每个序列内的方向变化
-            if seq_len > 1:
-                for i in range(batch_size):
-                    seq_pred = pred[i]
-                    seq_target = target[i]
-                    
-                    # 计算连续点之间的差值
-                    pred_diff = seq_pred[1:] - seq_pred[:-1]
-                    target_diff = seq_target[1:] - seq_target[:-1]
-                    
-                    # 计算方向是否一致（符号相同）
-                    pred_sign = torch.sign(pred_diff)
-                    target_sign = torch.sign(target_diff)
-                    
-                    # 找出非零方向变化的点（避免平值的干扰）
-                    valid_indices = (target_sign != 0) & (pred_sign != 0)
-                    
-                    if valid_indices.sum() > 0:
-                        # 计算方向不匹配的比例作为损失
-                        match = (pred_sign == target_sign).float()
-                        seq_dir_loss = 1.0 - torch.mean(match[valid_indices])
-                        direction_loss += seq_dir_loss
-            
-                # 平均每个批次的方向损失
-                if batch_size > 0:
-                    direction_loss = direction_loss / batch_size
-        else:
-            # 处理没有序列维度的情况
-            if batch_size > 1:
-                pred_diff = pred[1:] - pred[:-1]
-                target_diff = target[1:] - target[:-1]
-                
-                # 计算方向是否一致
-                pred_sign = torch.sign(pred_diff)
-                target_sign = torch.sign(target_diff)
-                
-                # 找出非零方向变化的点
-                valid_indices = (target_sign != 0) & (pred_sign != 0)
-                
-                if valid_indices.sum() > 0:
-                    # 计算方向不匹配的比例作为损失
-                    match = (pred_sign == target_sign).float()
-                    direction_loss = 1.0 - torch.mean(match[valid_indices])
+        # 平滑化差异值，防止极小值计算问题
+        pred_diff_sign = torch.sign(pred_diff + self.eps)
+        target_diff_sign = torch.sign(target_diff + self.eps)
         
-        # 计算最终损失
-        focal_mse_mean = torch.mean(focal_mse)
-        total_loss = (1 - self.direction_weight) * focal_mse_mean + self.direction_weight * direction_loss
+        # 计算方向匹配损失 (1表示方向不匹配)
+        direction_match = (pred_diff_sign * target_diff_sign < 0).float()
+        
+        # 对于非常小的变化（接近噪声），减少其在方向损失中的权重
+        small_change_mask = (torch.abs(target_diff) < 0.001).float()
+        weighted_direction_match = direction_match * (1.0 - 0.5 * small_change_mask)
+        
+        direction_loss = weighted_direction_match.mean()
+        
+        # 总损失
+        total_loss = (1 - self.direction_weight) * focal_loss + self.direction_weight * direction_loss
         
         return total_loss
 
@@ -1348,295 +1321,392 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     return model, train_losses, val_losses, val_dir_accs
 
 # 测试模型
-def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx, device='cpu'): # 添加 target_scaler 参数
+def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx, device='cpu'):
+    """
+    测试模型并返回预测结果（原始价格尺度）
+    增强版本：添加裁剪逻辑，限制预测值范围，
+    防止逆缩放后产生极端值
+    """
     model.eval()
-    X_test_tensor = torch.FloatTensor(X_test).to(device)
+    test_timestamps = original_df.index[test_start_idx:test_start_idx+len(X_test)]
     
-    # 使用混合精度进行预测
-    with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
-        y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
-    
-    # !!! 新增：在逆缩放前裁剪 y_pred_scaled !!!
-    # 计算缩放后 y_test 的 1% 和 99% 分位数作为裁剪边界
-    q_low = np.percentile(y_test, 1)
-    q_high = np.percentile(y_test, 99)
-    # 增加一些边界余量
-    clip_low = q_low - (q_high - q_low) * 0.5 
-    clip_high = q_high + (q_high - q_low) * 0.5
-    print(f"对缩放后的预测值进行裁剪，范围: [{clip_low:.4f}, {clip_high:.4f}]")
-    y_pred_scaled_clipped = np.clip(y_pred_scaled, clip_low, clip_high)
-    
-    # 逆缩放预测值和真实值 - !!! 使用 RobustScaler !!!
-    print("执行逆缩放...")
-    try:
-        # !!! 使用裁剪后的值进行逆缩放 !!!
-        y_pred = target_scaler.inverse_transform(y_pred_scaled_clipped)
-        y_test_original = target_scaler.inverse_transform(y_test)
-        
-        # 额外安全检查 - 处理可能的无穷值或NaN (保留)
-        y_pred = np.nan_to_num(y_pred, nan=np.nanmean(y_test_original), posinf=np.nanmax(y_test_original)*2, neginf=np.nanmin(y_test_original)*0.5)
-        y_test_original = np.nan_to_num(y_test_original, nan=np.nanmean(y_test_original))
-        
-        # 确保预测值在合理范围内 - 使用历史价格最小/最大值的扩展范围
-        min_price = np.min(original_df['close']) * 0.5
-        max_price = np.max(original_df['close']) * 2.0
-        y_pred = np.clip(y_pred, min_price, max_price)
-        y_test_original = np.clip(y_test_original, min_price, max_price)
-        
-        print("逆缩放完成")
-    except Exception as e:
-        print(f"错误：逆缩放失败 - {e}")
-        print("使用备用方法计算预测值...")
-        # 获取均值和标准差作为备用缩放方法
-        mean_price = np.mean(original_df['close'])
-        std_price = np.std(original_df['close'])
-        # 简单线性变换作为备用 - !!! 使用裁剪后的值 !!!
-        y_pred = y_pred_scaled_clipped * (std_price * 4) + mean_price 
-        y_test_original = y_test * (std_price * 4) + mean_price
-    
-    # 计算评估指标 (使用逆缩放后的原始尺度值)
-    metrics = calculate_metrics(y_test_original, y_pred)
-    
-    print("\n模型评估指标 (原始价格尺度):")
-    for key, value in metrics.items():
-        print(f"{key.upper()}: {value:.6f}")
-    
-    # 获取测试集对应的时间戳
-    test_timestamps = original_df['timestamp'].iloc[test_start_idx:test_start_idx+len(y_test_original)].values
-    
-    # 生成预测与实际值对比图 (使用原始价格)
-    plt.figure(figsize=(15, 15))
-    
-    # 价格对比图
-    plt.subplot(3, 1, 1)
-    plt.plot(test_timestamps, y_test_original, label='Actual Price', color='blue')
-    plt.plot(test_timestamps, y_pred, label='Predicted Price', color='red', linestyle='--')
-    plt.xlabel('Time')
-    plt.ylabel('Price')
-    plt.title('Bitcoin Price Prediction Comparison (Original Scale)')
-    plt.legend()
-    plt.grid(True)
-    
-    # 预测误差图
-    plt.subplot(3, 1, 2)
-    plt.plot(test_timestamps, y_test_original - y_pred, label='Prediction Error', color='green')
-    plt.axhline(y=0, color='r', linestyle='-')
-    plt.xlabel('Time')
-    plt.ylabel('Prediction Error')
-    plt.title('Prediction Error Distribution (Original Scale)')
-    plt.legend()
-    plt.grid(True)
-    
-    # 方向准确性图 (使用原始价格计算方向)
-    plt.subplot(3, 1, 3)
-    direction_true = np.diff(y_test_original.flatten())
-    direction_pred = np.diff(y_pred.flatten())
-    
-    correct_dir = (np.sign(direction_true) == np.sign(direction_pred))
-    dir_colors = ['green' if c else 'red' for c in correct_dir]
-    
-    plt.scatter(test_timestamps[1:], np.zeros_like(direction_true), 
-               c=dir_colors, marker='o', alpha=0.7, s=50)
-    plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-    
-    # 添加移动窗口方向准确率
-    window_size = 20
-    if len(correct_dir) > window_size:
-        rolling_accuracy = np.array([np.mean(correct_dir[i:i+window_size]) 
-                                    for i in range(len(correct_dir)-window_size+1)])
-        plt.plot(test_timestamps[window_size:], rolling_accuracy, 
-                color='blue', label=f'Rolling {window_size}-day Direction Accuracy') # Changed label
-        plt.legend()
-    
-    plt.ylim(-0.1, 1.1)
-    plt.xlabel('Time')
-    plt.ylabel('Direction Prediction Correctness')
-    plt.title('Price Change Direction Prediction Accuracy (Green=Correct, Red=Incorrect)') # Changed title
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig('models/price_prediction_comparison.png')
-    plt.close()
-    
-    # 计算滚动预测性能 (使用原始价格)
-    window_sizes = [7, 14, 30]
-    rolling_metrics = {}
-    
-    for window in window_sizes:
-        if len(y_test_original) > window:
-            rolling_metrics[f'{window}day'] = []
+    with torch.no_grad():
+        # 确保输入数据在正确的设备上
+        if isinstance(X_test, np.ndarray):
+            X_test = torch.FloatTensor(X_test).to(device)
+        elif X_test.device.type != device:
+            X_test = X_test.to(device)
             
-            for i in range(len(y_test_original) - window + 1):
-                window_true = y_test_original[i:i+window]
-                window_pred = y_pred[i:i+window]
+        # 进行预测
+        y_pred_scaled = model(X_test)
+        
+        # 确保形状正确
+        if len(y_pred_scaled.shape) > 2:
+            y_pred_scaled = y_pred_scaled.squeeze(-1)
+        
+        # 移回CPU用于后处理    
+        y_pred_scaled = y_pred_scaled.cpu().numpy()
+        
+        # 计算安全的裁剪边界，基于训练数据分布
+        y_test_np = y_test.cpu().numpy() if torch.is_tensor(y_test) else y_test
+        
+        # 使用百分位数计算裁剪边界，略微扩大范围以允许一些合理预测
+        q_low, q_high = np.percentile(y_test_np, [1, 99])
+        margin = (q_high - q_low) * 0.2  # 20%的边界扩展
+        
+        clip_low = q_low - margin
+        clip_high = q_high + margin
+        
+        # 检查并修正极端异常值
+        if clip_low < -10 or clip_high > 10:
+            # 这可能表明数据分布存在问题，使用更保守的边界
+            clip_low = max(clip_low, -3)
+            clip_high = min(clip_high, 10)
+        
+        # 检查是否有NaN值
+        if np.isnan(y_pred_scaled).any():
+            print("警告: 预测结果包含NaN值，将替换为0")
+            y_pred_scaled = np.nan_to_num(y_pred_scaled, nan=0.0)
+        
+        print(f"对缩放后的预测值进行裁剪，范围: [{clip_low:.4f}, {clip_high:.4f}]")
+        y_pred_scaled_clipped = np.clip(y_pred_scaled, clip_low, clip_high)
+        
+        # 检查裁剪是否改变了大量值
+        clipped_pct = np.mean((y_pred_scaled != y_pred_scaled_clipped)) * 100
+        if clipped_pct > 10:
+            print(f"警告: {clipped_pct:.2f}%的预测值被裁剪，可能表明模型输出不稳定")
+        
+        # 计算逆缩放前后的统计量，帮助识别潜在问题
+        print("缩放预测的统计指标:")
+        print(f"  均值: {np.mean(y_pred_scaled_clipped):.4f}, 中位数: {np.median(y_pred_scaled_clipped):.4f}")
+        print(f"  标准差: {np.std(y_pred_scaled_clipped):.4f}")
+        print(f"  最小值: {np.min(y_pred_scaled_clipped):.4f}, 最大值: {np.max(y_pred_scaled_clipped):.4f}")
+        
+        # 执行逆缩放，同时捕获潜在的溢出警告
+        print("执行逆缩放...")
+        
+        # 确保输入格式正确
+        if len(y_pred_scaled_clipped.shape) == 1:
+            y_pred_scaled_clipped = y_pred_scaled_clipped.reshape(-1, 1)
+            
+        # 使用try-except块处理可能的溢出
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                y_pred = target_scaler.inverse_transform(y_pred_scaled_clipped)
                 
-                # 计算窗口内的方向准确率
-                window_dir_true = np.diff(window_true.flatten())
-                window_dir_pred = np.diff(window_pred.flatten())
-                window_dir_acc = np.mean((np.sign(window_dir_true) == np.sign(window_dir_pred))) * 100 if len(window_dir_true)>0 else 0
+                if len(w) > 0:
+                    print(f"警告：逆缩放过程中捕获到{len(w)}个警告。尝试替代方法...")
+                    # 如果有警告，使用更安全的逆变换方法
+                    # 首先获取缩放器的参数
+                    if hasattr(target_scaler, 'scale_') and hasattr(target_scaler, 'min_'):
+                        # MinMaxScaler
+                        scale = target_scaler.scale_
+                        min_val = target_scaler.min_
+                        y_pred = y_pred_scaled_clipped / scale + min_val
+                    elif hasattr(target_scaler, 'scale_') and hasattr(target_scaler, 'center_'):
+                        # RobustScaler
+                        scale = target_scaler.scale_
+                        center = target_scaler.center_
+                        y_pred = y_pred_scaled_clipped * scale + center
+                    elif hasattr(target_scaler, 'mean_') and hasattr(target_scaler, 'scale_'):
+                        # StandardScaler
+                        scale = target_scaler.scale_
+                        mean = target_scaler.mean_
+                        y_pred = y_pred_scaled_clipped * scale + mean
+                    else:
+                        # 如果无法识别缩放器类型，使用原始结果
+                        print("无法识别缩放器类型，使用原始结果")
+                        pass
+        except Exception as e:
+            print(f"逆缩放时出错: {str(e)}，尝试手动逆缩放...")
+            # 手动尝试逆缩放
+            if hasattr(target_scaler, 'scale_'):
+                if hasattr(target_scaler, 'min_'):
+                    # MinMaxScaler
+                    scale = target_scaler.scale_
+                    min_val = target_scaler.min_
+                    y_pred = y_pred_scaled_clipped / scale + min_val
+                elif hasattr(target_scaler, 'center_'):
+                    # RobustScaler
+                    scale = target_scaler.scale_
+                    center = target_scaler.center_
+                    y_pred = y_pred_scaled_clipped * scale + center
+                elif hasattr(target_scaler, 'mean_'):
+                    # StandardScaler
+                    scale = target_scaler.scale_
+                    mean = target_scaler.mean_
+                    y_pred = y_pred_scaled_clipped * scale + mean
+                else:
+                    print("无法手动逆缩放，使用原始缩放值")
+                    y_pred = y_pred_scaled_clipped
+            else:
+                print("无法手动逆缩放，使用原始缩放值")
+                y_pred = y_pred_scaled_clipped
+        
+        # 处理逆缩放后的异常值
+        if np.isnan(y_pred).any() or np.isinf(y_pred).any():
+            print("警告: 逆缩放后发现NaN或Inf值，替换为合理值")
+            # 计算非NaN和非Inf值的中位数作为替换值
+            valid_mask = ~(np.isnan(y_pred) | np.isinf(y_pred))
+            if np.any(valid_mask):
+                replace_value = np.median(y_pred[valid_mask])
+            else:
+                # 如果所有值都是NaN或Inf，使用原始数据的中位数
+                replace_value = np.median(original_df.iloc[test_start_idx:test_start_idx+len(X_test)].values)
+            
+            y_pred = np.nan_to_num(y_pred, nan=replace_value, posinf=replace_value*1.5, neginf=replace_value*0.5)
+        
+        # 确保输出是一维数组
+        if y_pred.shape[1] == 1:
+            y_pred = y_pred.flatten()
+            
+        # 对应地转换y_test为原始尺度
+        if torch.is_tensor(y_test):
+            y_test_np = y_test.cpu().numpy()
+        else:
+            y_test_np = y_test
+            
+        if len(y_test_np.shape) == 1:
+            y_test_np = y_test_np.reshape(-1, 1)
+            
+        try:
+            y_test_original = target_scaler.inverse_transform(y_test_np)
+            if y_test_original.shape[1] == 1:
+                y_test_original = y_test_original.flatten()
+        except Exception as e:
+            print(f"逆变换y_test时出错: {str(e)}")
+            # 使用原始数据作为后备
+            y_test_original = original_df.iloc[test_start_idx:test_start_idx+len(X_test)].values
+            if len(y_test_original.shape) > 1 and y_test_original.shape[1] == 1:
+                y_test_original = y_test_original.flatten()
                 
-                rolling_metrics[f'{window}day'].append({
-                    'start_idx': i,
-                    'end_idx': i+window-1,
-                    'start_time': test_timestamps[i],
-                    'end_time': test_timestamps[i+window-1],
-                    'direction_accuracy': window_dir_acc
-                })
+    # 显示逆缩放完成消息
+    print("逆缩放完成")
     
-    # 输出滚动窗口性能最好的时间段
-    print("\n各滚动窗口最佳预测性能时间段:")
-    for window, metrics_list in rolling_metrics.items():
-        best_period = max(metrics_list, key=lambda x: x['direction_accuracy'])
-        print(f"{window}窗口最佳方向准确率: {best_period['direction_accuracy']:.2f}%, " + 
-              f"时间段: {best_period['start_time']} 到 {best_period['end_time']}")
-    
-    # 保存滚动指标
-    for window, metrics_list in rolling_metrics.items():
-        df = pd.DataFrame(metrics_list)
-        df.to_csv(f'models/rolling_{window}_metrics.csv', index=False)
-    
-    print(f"\n价格预测对比图已保存到 models/price_prediction_comparison.png")
-    print(f"滚动窗口指标已保存到 models/rolling_*_metrics.csv")
-    
-    return y_pred, metrics, test_timestamps, y_test_original
+    # 返回预测值、原始y值和时间戳
+    return y_pred, y_test_original, test_timestamps
 
 # 改进的交易信号生成
-def generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df, threshold_pct=0.5, volatility_window=10):
+def generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df, threshold_pct=0.3, volatility_window=20):
     """
-    生成交易信号，修正版：确保生成买入和卖出信号，并在原始价格尺度上计算
+    根据原始价格尺度的预测生成交易信号
     
     参数:
-    - y_test_original: 原始价格尺度的真实值
-    - y_pred: 原始价格尺度的预测值
-    - threshold_pct: 降低到0.5%，提高信号生成敏感度
-    - volatility_window: 减少到10，更敏感地捕捉价格变化
+    - y_test_original: 测试集的原始价格（目标变量）
+    - y_pred: 测试集的预测价格
+    - test_timestamps: 对应的时间戳
+    - original_df: 原始数据
+    - threshold_pct: 触发交易的最小价格变化百分比
+    - volatility_window: 波动率计算窗口大小
+    
+    返回:
+    - 包含交易信号的DataFrame
     """
-    print(f"生成交易信号（基于原始价格尺度），基准阈值为价格的 {threshold_pct}%...")
     signals = []
+    print(f"生成交易信号（基于原始价格尺度），基准阈值为价格的 {threshold_pct}%...")
     
-    # 计算近期波动率来动态设置阈值 - !!! 基于原始价格 y_test_original !!!
-    price_changes = np.diff(y_test_original.flatten()) # 使用原始价格计算变化
-    rolling_volatility = []
+    # 计算整个预测序列的波动性统计量
+    price_changes_pct = np.abs(np.diff(y_test_original) / y_test_original[:-1]) * 100
+    median_change_pct = np.median(price_changes_pct)
+    mean_change_pct = np.mean(price_changes_pct)
     
-    for i in range(len(price_changes)):
-        if i < volatility_window:
-            window = price_changes[:i+1]
+    # 根据整体市场特性调整基准阈值
+    adaptive_threshold_pct = min(max(threshold_pct, median_change_pct * 0.3), 1.0)
+    print(f"自适应基准阈值: {adaptive_threshold_pct:.2f}%，基于中位数价格变化: {median_change_pct:.2f}%")
+    
+    # 创建用于计算滚动波动率的DataFame
+    volatility_df = pd.DataFrame(index=test_timestamps)
+    volatility_df['close'] = y_test_original
+    
+    # 计算滚动波动率(使用对数收益率)
+    volatility_df['returns'] = np.log(volatility_df['close'] / volatility_df['close'].shift(1))
+    volatility_df['volatility'] = volatility_df['returns'].rolling(window=volatility_window).std() * np.sqrt(24)  # 转换为日波动率
+    volatility_df['volatility_pct'] = volatility_df['volatility'] * 100  # 转换为百分比
+    volatility_df['volatility_abs'] = volatility_df['volatility'] * volatility_df['close']  # 绝对价格波动
+
+    # 确保正确的起始索引
+    start_idx = volatility_window
+    
+    # 计算预测价格变化的统计信息
+    pred_changes = np.diff(y_pred)
+    pred_changes_pct = np.abs(pred_changes / y_pred[:-1]) * 100
+    pred_changes_mean = np.mean(pred_changes_pct)
+    pred_changes_std = np.std(pred_changes_pct)
+    
+    # 相对强度指标 (RSI) 计算，用于平衡买卖信号
+    close_series = pd.Series(y_test_original)
+    delta = close_series.diff()
+    gain = delta.mask(delta < 0, 0)
+    loss = -delta.mask(delta > 0, 0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    
+    # 确保不除以零
+    avg_loss = avg_loss.replace(0, 1e-10)  
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 转换为numpy便于索引
+    rsi_values = rsi.values
+    
+    # 价格区间分析
+    price_range_pct = (np.max(y_test_original) - np.min(y_test_original)) / np.min(y_test_original) * 100
+    range_factor = min(max(price_range_pct / 50, 0.5), 2.0)  # 价格变化范围因子
+    
+    for i in range(start_idx, len(y_test_original)):
+        # 当前时间戳和相关价格数据
+        timestamp = test_timestamps[i]
+        current_price = y_test_original[i]
+        predicted_price = y_pred[i]
+        previous_price = y_test_original[i-1]
+        
+        # 计算价格变化百分比
+        price_change = predicted_price - current_price
+        price_change_pct = price_change / current_price * 100
+        
+        # 获取当前波动率
+        current_volatility = volatility_df['volatility_pct'].iloc[i]
+        current_volatility_abs = volatility_df['volatility_abs'].iloc[i]
+        
+        # 当前RSI值
+        current_rsi = rsi_values[i] if i < len(rsi_values) else 50
+        
+        # 动态阈值 (基于当前波动性和价格范围调整)
+        dynamic_threshold_pct = adaptive_threshold_pct * (0.5 + current_volatility / np.mean(volatility_df['volatility_pct'].iloc[start_idx:]) * 0.5) * range_factor
+        
+        # 信号仓位大小 (基于预测与当前波动率的比值)
+        signal_strength = min(abs(price_change_pct) / (dynamic_threshold_pct * 2), 1.0)
+        
+        # 预测置信度 (使用统计分析确定异常值)
+        if i > 0 and i < len(pred_changes_pct):
+            z_score = (pred_changes_pct[i-1] - pred_changes_mean) / (pred_changes_std + 1e-6)
+            confidence = max(min(1.0 - abs(z_score)/3, 1.0), 0.2)  # 将置信度限制在[0.2, 1.0]区间
         else:
-            window = price_changes[i-volatility_window+1:i+1]
-        # 计算标准差作为波动率（原始价格尺度）
-        rolling_volatility.append(np.std(window))
-    
-    # 确保 rolling_volatility 长度与 y_pred 一致
-    if len(rolling_volatility) < len(y_pred):
-        rolling_volatility = [rolling_volatility[0]] * (len(y_pred) - len(rolling_volatility)) + rolling_volatility
-    else:
-        rolling_volatility = rolling_volatility[:len(y_pred)]
+            confidence = 0.5  # 默认中等置信度
         
-    rolling_volatility = np.array(rolling_volatility)
-    
-    # 显示初始统计信息
-    print(f"平均波动率 (原始价格): {np.mean(rolling_volatility):.2f}")
-    print(f"最小波动率: {np.min(rolling_volatility):.2f}")
-    print(f"最大波动率: {np.max(rolling_volatility):.2f}")
-    
-    # 调整动态阈值的计算方式
-    volatility_factor = 1.0  # 降低这个乘数
-    
-    # 遍历每一个预测值（从第二个开始）
-    for i in range(1, len(y_pred)):
-        # 当前真实价格 (原始尺度)
-        current_price = y_test_original[i][0]
+        # 考虑RSI超买超卖，平衡信号分布
+        rsi_modifier = 1.0
+        if current_rsi > 70:  # 超买区域，增加卖出信号概率
+            rsi_modifier = 1.2
+        elif current_rsi < 30:  # 超卖区域，增加买入信号概率
+            rsi_modifier = 0.8
         
-        # 上一个真实价格 (原始尺度)
-        previous_price = y_test_original[i-1][0]
-        
-        # 预测的下一个价格 (原始尺度)
-        predicted_next_price = y_pred[i][0]
-        
-        # 预测的价格变化百分比 - !!! 基于原始价格计算 !!!
-        predicted_change_pct = (predicted_next_price - current_price) / current_price * 100 if current_price != 0 else 0
-        
-        # 当前的波动率 (原始价格尺度)
-        current_volatility = rolling_volatility[i]
-        
-        # 动态阈值，基于当前波动率但有最小值 - !!! 阈值也是原始价格的百分比 !!!
-        dynamic_threshold_abs = max(current_price * (threshold_pct / 100), current_volatility * volatility_factor)
-        
-        # 将绝对阈值转回百分比阈值（仅为记录和比较）
-        dynamic_threshold_pct = (dynamic_threshold_abs / current_price * 100) if current_price != 0 else threshold_pct
-        
-        # 生成交易信号，确保有买入和卖出 - !!! 使用百分比比较 !!!
-        if predicted_change_pct > dynamic_threshold_pct:
+        # 生成交易信号
+        if price_change_pct > dynamic_threshold_pct * rsi_modifier:
             signal = "买入"
-        elif predicted_change_pct < -dynamic_threshold_pct:
+        elif price_change_pct < -dynamic_threshold_pct / rsi_modifier:
             signal = "卖出"
         else:
             signal = "持有"
+            
+        # 通过置信度调整信号，提高多样性
+        # 对于低置信度的预测，增加生成"持有"信号的概率
+        if confidence < 0.5 and np.random.random() < 0.7 * (1-confidence):
+            signal = "持有"
+            signal_strength = 0.0
+            
+        # 强制平衡交易信号
+        # 如果卖出信号连续过多，降低卖出阈值
+        if i > 10:
+            recent_signals = [s['signal'] for s in signals[-10:]]
+            buy_count = sum(1 for s in recent_signals if s == "买入")
+            sell_count = sum(1 for s in recent_signals if s == "卖出")
+            
+            # 如果卖出信号远多于买入信号，增加买入概率
+            if sell_count > buy_count * 3:
+                if signal == "卖出" and np.random.random() < 0.4:
+                    if abs(price_change_pct) < dynamic_threshold_pct * 1.5:
+                        signal = "持有"
+                    elif price_change_pct > 0 and price_change_pct > dynamic_threshold_pct * 0.7:
+                        signal = "买入"
+                        
+            # 如果买入信号远多于卖出信号，增加卖出概率
+            elif buy_count > sell_count * 3:
+                if signal == "买入" and np.random.random() < 0.4:
+                    if abs(price_change_pct) < dynamic_threshold_pct * 1.5:
+                        signal = "持有"
+                    elif price_change_pct < 0 and abs(price_change_pct) > dynamic_threshold_pct * 0.7:
+                        signal = "卖出"
         
-        # 记录日期时间以便更好地分析
-        timestamp = test_timestamps[i]
-        
+        # 记录信号
         signals.append({
-            'time_step': i,
             'timestamp': timestamp,
-            'current_price': current_price,
-            'predicted_next_price': predicted_next_price,
-            'predicted_change_pct': predicted_change_pct,
-            'volatility_abs': current_volatility, # 记录绝对波动率
-            'dynamic_threshold_pct': dynamic_threshold_pct, # 记录百分比阈值
-            'signal': signal
+            'price': current_price,
+            'predicted_price': predicted_price,
+            'price_change': price_change,
+            'price_change_pct': price_change_pct,
+            'volatility_pct': current_volatility,
+            'volatility_abs': current_volatility_abs,
+            'dynamic_threshold_pct': dynamic_threshold_pct,
+            'signal': signal,
+            'confidence': confidence,
+            'signal_strength': signal_strength,
+            'rsi': current_rsi
         })
     
-    # 转换为DataFrame并保存
+    # 创建DataFrame并保存
     signals_df = pd.DataFrame(signals)
-    signals_df.to_csv('models/enhanced_trading_signals.csv', index=False)
     
-    print(f"交易信号已保存到 models/enhanced_trading_signals.csv")
-    
-    # 统计信号分布
+    # 计算交易信号分布
     signal_counts = signals_df['signal'].value_counts()
+    total_signals = len(signals_df)
+    
     print("\n交易信号分布:")
-    for signal, count in signal_counts.items():
-        print(f"{signal}: {count} ({count/len(signals)*100:.2f}%)")
+    for signal_type, count in signal_counts.items():
+        percentage = count / total_signals * 100
+        print(f"{signal_type}: {count} ({percentage:.2f}%)")
     
-    # 生成交易信号可视化
-    plt.figure(figsize=(15, 10))
+    # 保存交易信号到CSV
+    output_path = 'models/enhanced_trading_signals.csv'
+    signals_df.to_csv(output_path, index=False)
+    print(f"交易信号已保存到 {output_path}")
     
-    # 价格和信号图
-    plt.subplot(2, 1, 1)
-    plt.plot(signals_df['timestamp'], signals_df['current_price'], label='Actual Price', color='blue')
-    plt.plot(signals_df['timestamp'], signals_df['predicted_next_price'], label='Predicted Price', color='red', linestyle='--')
+    # 可视化
+    plt.figure(figsize=(14, 10))
     
-    # 标记买入和卖出信号
+    # 价格图
+    plt.subplot(311)
+    plt.plot(signals_df['timestamp'], signals_df['price'], label='实际价格', color='blue')
+    plt.plot(signals_df['timestamp'], signals_df['predicted_price'], label='预测价格', color='orange', linestyle='--')
+    
+    # 标记买入和卖出点
     buy_signals = signals_df[signals_df['signal'] == '买入']
     sell_signals = signals_df[signals_df['signal'] == '卖出']
     
-    plt.scatter(buy_signals['timestamp'], buy_signals['current_price'], 
-                color='green', marker='^', s=100, label='Buy Signal') # Changed label
-    plt.scatter(sell_signals['timestamp'], sell_signals['current_price'], 
-                color='red', marker='v', s=100, label='Sell Signal') # Changed label
+    plt.scatter(buy_signals['timestamp'], buy_signals['price'], color='green', marker='^', s=50, label='买入信号')
+    plt.scatter(sell_signals['timestamp'], sell_signals['price'], color='red', marker='v', s=50, label='卖出信号')
     
-    plt.xlabel('Time')
-    plt.ylabel('Price')
-    plt.title('Bitcoin Price and Trading Signals')
+    plt.title('价格预测和交易信号')
+    plt.ylabel('价格')
     plt.legend()
     plt.grid(True)
     
-    # 波动率和阈值图
-    plt.subplot(2, 1, 2)
-    plt.plot(signals_df['timestamp'], signals_df['volatility_abs'], label='Volatility', color='purple')
-    plt.plot(signals_df['timestamp'], signals_df['dynamic_threshold_pct'], label='Dynamic Threshold', color='orange')
-    plt.xlabel('Time')
-    plt.ylabel('Percentage')
-    plt.title('Volatility and Dynamic Threshold')
+    # 价格变化百分比和动态阈值
+    plt.subplot(312)
+    plt.plot(signals_df['timestamp'], signals_df['price_change_pct'], label='价格变化%', color='purple')
+    plt.plot(signals_df['timestamp'], signals_df['dynamic_threshold_pct'], label='动态阈值%', color='red', linestyle='-.')
+    plt.plot(signals_df['timestamp'], -signals_df['dynamic_threshold_pct'], color='red', linestyle='-.')
+    plt.ylabel('百分比(%)')
+    plt.title('价格变化百分比与动态阈值')
+    plt.legend()
+    plt.grid(True)
+    
+    # RSI指标
+    plt.subplot(313)
+    plt.plot(signals_df['timestamp'], signals_df['rsi'], label='RSI', color='green')
+    plt.axhline(y=70, color='r', linestyle='--', label='超买(70)')
+    plt.axhline(y=30, color='g', linestyle='--', label='超卖(30)')
+    plt.axhline(y=50, color='gray', linestyle=':')
+    plt.title('相对强弱指标(RSI)')
+    plt.ylabel('RSI值')
+    plt.ylim(0, 100)
     plt.legend()
     plt.grid(True)
     
     plt.tight_layout()
     plt.savefig('models/trading_signals_visualization.png')
-    plt.close()
-    
-    print(f"交易信号可视化已保存到 models/trading_signals_visualization.png")
+    print("交易信号可视化已保存到 models/trading_signals_visualization.png")
     
     return signals_df
 
@@ -2689,20 +2759,19 @@ def main():
     # 设置随机种子，确保结果可复现
     set_seed(42)
     
-    # 是否禁用数据增强
-    disable_augmentation = True
+    # 设置默认配置参数
+    disable_augmentation = True  # 默认禁用数据增强
+    model_type = "lstm"  # 默认使用LSTM模型
+    loss_function = "focal"  # 默认使用focal loss
     
-    # 检查环境
-    check_environment()
-    print("==== 环境检查完成 ====\n")
-    
-    # 选择设备 (GPU / CPU)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # 设置设备类型
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"使用设备: {device}")
     
-    # 设置GPU优化 - 对于NVIDIA GPU
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
+    # 启用CUDA优化（如果可用）
+    if device == 'cuda':
+        # 启用自动混合精度训练
+        torch.cuda.amp.autocast(enabled=True)
         torch.backends.cudnn.deterministic = False  # 为了性能
         torch.backends.cudnn.benchmark = True  # 启用cuDNN自动优化
         
@@ -2722,8 +2791,8 @@ def main():
     # 设置超参数
     input_size = train_data[0].shape[-1]
     seq_len = train_data[0].shape[1]
-    batch_size = 2048  # 从1024调整为2048，更好地平衡训练速度和资源利用率
-    lr = 0.001  # 初始学习率保持不变
+    batch_size = 512  # 从2048减小到512，提高梯度更新频率
+    lr = 0.00005  # 保持较低的学习率
     
     # 创建数据集和数据加载器
     X_train, y_train = train_data
@@ -2743,174 +2812,167 @@ def main():
     elif mem_gb >= 8:
         print(f"显存充足({mem_gb:.1f}GB)，启用数据增强...")
         aug_factor = min(int(mem_gb / 4), 4)  # 根据显存大小决定增强倍数
+        print(f"计划增强训练集至 {aug_factor}x 原始大小")
         X_train_aug, y_train_aug = create_augmented_dataset(X_train, y_train, num_augmentations=aug_factor)
+        print(f"增强后训练集大小: {X_train_aug.shape}")
     else:
-        print("显存不足(<8GB)，跳过数据增强步骤")
+        print(f"显存有限({mem_gb:.1f}GB)，使用原始数据进行训练")
         X_train_aug, y_train_aug = X_train, y_train
     
-    print(f"数据增强后训练集大小: {X_train_aug.shape}")
+    # 将数据转换为张量并创建数据加载器
+    train_tensor_x = torch.FloatTensor(X_train_aug)
+    train_tensor_y = torch.FloatTensor(y_train_aug)
+    train_dataset = TensorDataset(train_tensor_x, train_tensor_y)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
     
-    # 创建PyTorch数据集
-    train_dataset = TensorDataset(torch.FloatTensor(X_train_aug), torch.FloatTensor(y_train_aug))
-    val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val))
+    val_tensor_x = torch.FloatTensor(X_val)
+    val_tensor_y = torch.FloatTensor(y_val)
+    val_dataset = TensorDataset(val_tensor_x, val_tensor_y)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True)
     
-    # 使用DataLoader加载数据
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        pin_memory=True,
-        num_workers=os.cpu_count(),
-        persistent_workers=True,
-        prefetch_factor=2
-    )
+    # 确保模型输出目录存在
+    os.makedirs('models', exist_ok=True)
     
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size*2,  # 验证时可以用更大的批次
-        shuffle=False, 
-        pin_memory=True,
-        num_workers=os.cpu_count(),
-        persistent_workers=True
-    )
+    # 根据选择的模型类型创建模型
+    model_options = {
+        'lstm': EnhancedLSTMModel,
+        'attention': AttentionLSTMModel,
+        'transformer': EnhancedLSTMTransformerModel,
+        'advanced': AdvancedLSTMTransformerModel
+    }
     
-    # 初始化模型 - 强制使用简化的 EnhancedLSTMModel
-    model_type = "lstm"  # 强制指定模型类型
-    print("强制使用模型类型: lstm")
-    model = EnhancedLSTMModel(
-        input_size=input_size,
-        hidden_size=256,  # 使用简化后的参数
-        num_layers=2,
-        dropout=0.3
-    ).to(device)
+    model_class = model_options.get(model_type.lower(), EnhancedLSTMModel)
+    model_name_map = {
+        'lstm': 'Enhanced LSTM',
+        'attention': 'Attention LSTM',
+        'transformer': 'LSTM+Transformer',
+        'advanced': 'Advanced LSTM+Transformer'
+    }
     
-    # 打印模型信息
-    print(f"使用模型类型: {model_type}")
-    model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"模型参数量: {model_parameters/1000000:.2f}M")
+    print(f"使用模型: {model_name_map.get(model_type.lower(), 'Enhanced LSTM')}")
     
-    # 创建损失函数 - 强制使用 FocalMSELoss，因为我们现在只用LSTM
-    print("强制使用损失函数: FocalMSELoss")
-    criterion = FocalMSELoss(
-        gamma=2.0, 
-        alpha=0.5, 
-        direction_weight=0.6  # !!! 降低方向权重 !!!
-    ).to(device)
-    
-    # 创建优化器
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=5e-5,  # !!! 进一步降低初始学习率 !!!
-        weight_decay=5e-6, 
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-    
-    # 使用余弦退火学习率调度
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, 
-        T_0=10,  # 减少重启周期，加快收敛
-        T_mult=2, 
-        eta_min=1e-6 # 提高最小学习率
-    )
-
-    # 确认训练参数
-    print(f"损失函数: {type(criterion).__name__}, alpha: {getattr(criterion, 'alpha', 'N/A')}, direction_weight: {getattr(criterion, 'direction_weight', 'N/A')}")
-    print(f"优化器: AdamW, 初始学习率: {optimizer.param_groups[0]['lr']:.1e}, 权重衰减: {optimizer.param_groups[0]['weight_decay']:.1e}")
-    print(f"学习率调度器: CosineAnnealingWarmRestarts, T_0: {scheduler.T_0}, T_mult: {scheduler.T_mult}, eta_min: {scheduler.eta_min:.1e}")
-
-    # 训练模型
-    print("\n开始模型训练...")
-    trained_model, train_losses, val_losses, val_dir_accs = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        epochs=150,  # 增加训练轮次
-        patience=35,  # 增加早停耐心值
-        model_save_path='models',
-        l2_weight=5e-6  # 减少L2正则化权重
-    )
-
-    # 测试模型
-    checkpoint = torch.load('models/best_lstm_model.pth', weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    # 加载对应的 target_scaler
-    target_scaler_path = 'data/target_scaler_v2.pkl'
-    if os.path.exists(target_scaler_path):
-        target_scaler_loaded = joblib.load(target_scaler_path)
-        y_pred, metrics, test_timestamps, y_test_original = test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
-        
-        # 执行交易信号生成和回测
-        print("\n===== 开始交易信号生成和回测 =====")
-        # 生成交易信号 - !!! 使用原始尺度的 y_test_original !!!
-        signals_df = generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df, threshold_pct=0.3, volatility_window=8)
-        
-        # 执行回测 - 调整参数以促进更多交易
-        backtest_results = backtest_strategy(
-            signals_df, 
-            initial_capital=10000.0,   # 初始资金1万美元
-            commission_rate=0.0005,    # 降低手续费到0.05%
-            slippage_pct=0.0005,       # 降低滑点到0.05%
-            risk_control=True,         # 保持启用风险控制
-            position_sizing='fixed',   # 改为固定仓位策略更简单明确
-            max_drawdown_pct=0.25      # 增加回撤容忍度到25%
-        )
-        
-        print("\n===== 回测结束 =====")
+    if model_type.lower() == 'advanced':
+        model = model_class(input_size=input_size, seq_len=seq_len).to(device)
     else:
-        print(f"错误: 找不到目标缩放器 {target_scaler_path}，无法进行测试评估。")
+        model = model_class(input_size=input_size).to(device)
     
-    # 输出性能优化总结
-    print("\n==== 性能优化总结 ====")
-    print("本次训练中应用的性能优化包括:")
+    # 模型参数统计
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型总参数: {total_params:,} (可训练: {trainable_params:,})")
     
-    if torch.cuda.is_available():
-        gpu_util = torch.cuda.utilization(0)
-        mem_used = torch.cuda.memory_allocated()/1e9
-        mem_total = torch.cuda.get_device_properties(0).total_memory/1e9
-        
-        # 计算内存和GPU利用率
-        mem_util = (mem_used / mem_total) * 100
-        
-        print(f"1. 硬件利用率:")
-        print(f"   - GPU计算利用率: {gpu_util:.1f}%")
-        print(f"   - GPU显存利用率: {mem_util:.1f}% ({mem_used:.2f}GB/{mem_total:.2f}GB)")
-        
-        # 多GPU支持
-        if torch.cuda.device_count() > 1:
-            print(f"2. 多GPU并行: 使用了{torch.cuda.device_count()}个GPU")
-        
-        # 自动混合精度
-        print("3. 混合精度训练 (AMP): 提高了计算效率和显存利用率")
-        
-        # 内存管理
-        peak_mem = torch.cuda.max_memory_allocated()/1e9
-        print(f"4. 内存管理优化: 峰值显存使用 {peak_mem:.2f}GB")
-        
-        # cuDNN优化
-        print("5. cuDNN优化: 启用了TF32加速和算法优化")
+    # 损失函数和优化器
+    criterion_options = {
+        'mse': nn.MSELoss(),
+        'direction': DirectionAwareLoss(),
+        'focal': FocalMSELoss(direction_weight=0.3, gamma=2.0)  # 方向损失权重已经显著降低
+    }
     
-    # 数据加载优化
-    print(f"6. 数据加载优化:")
-    print(f"   - 使用了{os.cpu_count()}个工作线程进行数据加载")
-    print(f"   - 启用pin_memory和持久化工作线程")
-    print(f"   - 批次大小:{batch_size}")
+    criterion = criterion_options.get(loss_function.lower(), nn.MSELoss())
+    print(f"使用损失函数: {loss_function}")
     
-    # 模型复杂度自适应
-    print(f"7. 模型复杂度自适应: 根据硬件能力选择了合适的模型架构")
+    # 使用AdamW优化器和OneCycleLR调度器
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)  # 增加权重衰减至1e-4，提高正则化强度
     
-    # 通用优化建议
-    print("\n要进一步提高性能，您可以:")
-    print("- 安装PyTorch 2.0+以使用torch.compile加速")
-    print("- 增加批次大小来提高吞吐量 (需要更多显存)")
-    print("- 使用更多GPU进行分布式训练")
-    print("- 考虑使用量化技术进一步减少显存占用")
+    # 学习率调度器：ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(
+        optimizer, 
+        mode='min',          # 监控最小化验证损失
+        factor=0.5,          # 每次降低一半学习率
+        patience=10,         # 10轮没有改善就降低学习率
+        min_lr=1e-6,         # 最小学习率限制
+        verbose=True         # 打印学习率变化
+    )
     
-    print("==== 优化总结结束 ====\n")
+    # 训练模型
+    train_model(
+        model, 
+        train_loader, 
+        val_loader, 
+        criterion, 
+        optimizer, 
+        scheduler,
+        device,
+        epochs=150,          # 最大轮次
+        patience=50,         # 增加早停耐心，给模型更多学习机会
+        model_save_path='models',
+        l2_weight=1e-4       # 增加L2正则化强度
+    )
+    
+    # 测试模型
+    X_test_tensor = torch.FloatTensor(X_test).to(device)
+    y_test_tensor = torch.FloatTensor(y_test)
+    
+    y_pred, y_test_original, test_timestamps = test_model(
+        model, X_test_tensor, y_test_tensor, target_scaler, original_df, len(X_train) + len(X_val), device)
+    
+    # 评估性能
+    metrics = calculate_metrics(y_test_original, y_pred)
+    
+    # 保存测试集预测结果可视化
+    plt.figure(figsize=(15, 6))
+    plt.plot(test_timestamps, y_test_original, label='实际价格', color='blue')
+    plt.plot(test_timestamps, y_pred, label='预测价格', color='red', linestyle='--')
+    plt.title('比特币价格预测')
+    plt.xlabel('时间')
+    plt.ylabel('价格 (USD)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('models/price_prediction_comparison.png')
+    plt.close()
+    
+    # 生成滚动窗口评估
+    window_sizes = [7*24, 14*24, 30*24]  # 小时为单位的窗口
+    window_names = ['7day', '14day', '30day']
+    
+    for window_size, window_name in zip(window_sizes, window_names):
+        if len(y_test_original) <= window_size:
+            print(f"测试集大小({len(y_test_original)})小于窗口大小({window_size})，跳过{window_name}滚动窗口评估")
+            continue
+            
+        # 计算滚动窗口的性能指标
+        rolling_metrics = []
+        
+        for i in range(len(y_test_original) - window_size + 1):
+            window_actual = y_test_original[i:i+window_size]
+            window_pred = y_pred[i:i+window_size]
+            window_metrics = calculate_metrics(window_actual, window_pred)
+            
+            # 添加窗口时间范围信息
+            window_metrics['start_time'] = test_timestamps[i]
+            window_metrics['end_time'] = test_timestamps[i+window_size-1]
+            
+            rolling_metrics.append(window_metrics)
+        
+        # 转换为DataFrame
+        rolling_df = pd.DataFrame(rolling_metrics)
+        
+        # 保存滚动窗口指标
+        rolling_df.to_csv(f'models/rolling_{window_name}_metrics.csv', index=False)
+        
+        # 找出方向准确率最高的窗口
+        best_dir_acc_idx = rolling_df['DIRECTION_ACCURACY'].idxmax()
+        best_dir_acc = rolling_df.loc[best_dir_acc_idx]
+        
+        print(f"{window_name}窗口最佳方向准确率: {best_dir_acc['DIRECTION_ACCURACY']:.2f}%, "
+              f"时间段: {best_dir_acc['start_time']} 到 {best_dir_acc['end_time']}")
+    
+    # 生成交易信号
+    signals_df = generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df)
+    
+    # 回测策略
+    print(f"开始回测交易策略，初始资金: $10000.0...")
+    backtest_results = backtest_strategy(signals_df)
+    
+    # 自动清理不再需要的中间结果，释放内存
+    del train_tensor_x, train_tensor_y, val_tensor_x, val_tensor_y
+    del train_dataset, val_dataset, train_loader, val_loader 
+    del X_train, X_val, X_test, y_train, y_val, y_test
+    if 'X_train_aug' in locals(): del X_train_aug, y_train_aug
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return model, metrics, backtest_results
 
 if __name__ == "__main__":
     main() 
