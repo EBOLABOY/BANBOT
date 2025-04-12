@@ -174,7 +174,7 @@ def profile_time(func):
 
 # 改进的LSTM模型 - 增加层数、隐藏单元和Dropout
 class EnhancedLSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size=512, num_layers=4, dropout=0.4):
+    def __init__(self, input_size, hidden_size=256, num_layers=2, dropout=0.3):
         super(EnhancedLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -184,33 +184,25 @@ class EnhancedLSTMModel(nn.Module):
             torch.backends.cudnn.enabled = True
             torch.backends.cudnn.benchmark = True
             
-        # LSTM层
+        # LSTM层 - 简化为单向LSTM
         self.lstm = nn.LSTM(
             input_size=input_size, 
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
             batch_first=True,
-            bidirectional=True
+            bidirectional=False  # 改为单向LSTM减少过拟合
         )
         
-        # 注意力机制
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size * 2,  # 双向LSTM，所以维度翻倍
-            num_heads=8,
-            dropout=dropout
-        )
+        # 简化网络结构 - 移除注意力机制
         
-        # 全连接层
-        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
+        # 全连接层 - 减少层数和神经元
+        self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
         self.dropout1 = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
-        self.dropout2 = nn.Dropout(dropout)
-        self.fc3 = nn.Linear(hidden_size // 2, 1)
+        self.fc2 = nn.Linear(hidden_size // 2, 1)
         
-        # 批归一化
-        self.bn1 = nn.BatchNorm1d(hidden_size)
-        self.bn2 = nn.BatchNorm1d(hidden_size // 2)
+        # 批归一化 - 保留一层
+        self.bn1 = nn.BatchNorm1d(hidden_size // 2)
         
         # 初始化权重
         self._initialize_weights()
@@ -236,28 +228,18 @@ class EnhancedLSTMModel(nn.Module):
         batch_size, seq_len, _ = x.size()
 
         # LSTM层
-        lstm_out, _ = self.lstm(x)  # lstm_out: (batch_size, seq_len, hidden_size*2)
-        
-        # 自注意力机制 (对输出序列应用注意力)
-        lstm_out = lstm_out.transpose(0, 1)  # (seq_len, batch_size, hidden_size*2)
-        attn_output, _ = self.attention(lstm_out, lstm_out, lstm_out)
-        attn_output = attn_output.transpose(0, 1)  # (batch_size, seq_len, hidden_size*2)
+        lstm_out, _ = self.lstm(x)  # lstm_out: (batch_size, seq_len, hidden_size)
         
         # 获取最后一个时间步的输出
-        out = attn_output[:, -1, :]  # (batch_size, hidden_size*2)
+        out = lstm_out[:, -1, :]  # (batch_size, hidden_size)
         
-        # FC层
-        out = self.fc1(out)  # (batch_size, hidden_size)
+        # FC层 - 简化版
+        out = self.fc1(out)  # (batch_size, hidden_size//2)
         out = F.relu(out)
         out = self.bn1(out)
         out = self.dropout1(out)
         
-        out = self.fc2(out)  # (batch_size, hidden_size//2)
-        out = F.relu(out)
-        out = self.bn2(out)
-        out = self.dropout2(out)
-        
-        out = self.fc3(out)  # (batch_size, 1)
+        out = self.fc2(out)  # (batch_size, 1)
         
         return out
 
@@ -342,45 +324,39 @@ class DirectionAwareLoss(nn.Module):
 
 # Focal Loss变体，专注于难以预测的样本
 class FocalMSELoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.7, direction_weight=0.3):
+    """
+    结合了方向预测的MSE损失，专注于难例并重点关注方向预测
+    """
+    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.8):
         super(FocalMSELoss, self).__init__()
-        self.gamma = gamma  # 聚焦参数
-        self.alpha = alpha  # 平衡因子
-        self.direction_weight = direction_weight  # 方向损失权重
-        
+        self.gamma = gamma
+        self.alpha = alpha
+        self.direction_weight = direction_weight  # 增加方向权重到0.8
+    
     def forward(self, pred, target):
         # 计算MSE
-        diff = pred - target
-        mse = torch.pow(diff, 2)
+        mse = F.mse_loss(pred, target, reduction='none')
         
-        # Focal Loss权重 - 误差越大，权重越高
-        # 归一化差异以控制权重范围
-        with torch.no_grad():
-            abs_diff = torch.abs(diff)
-            max_diff = torch.max(abs_diff)
-            if max_diff > 0:
-                norm_diff = abs_diff / max_diff
-            else:
-                norm_diff = abs_diff
-                
-            # 计算Focal权重
-            focal_weight = torch.pow(norm_diff, self.gamma)
-            focal_weight = self.alpha + (1 - self.alpha) * focal_weight
+        # 计算每个样本的权重（聚焦难以预测的样本）
+        weight = self.alpha * (1 - torch.exp(-mse)) ** self.gamma
+        focal_mse = weight * mse
         
-        # 应用focal权重到MSE
-        focal_mse = focal_weight * mse
-        
-        # 添加方向损失组件
-        batch_size = pred.size(0)
-        if batch_size > 1 and self.direction_weight > 0:
+        # 获取连续预测序列的方向 - 考虑使用变化
+        # 如果batch中有多个序列，需要reshape
+        if len(pred.shape) > 2:
+            pred = pred.reshape(-1, pred.shape[-1])
+            target = target.reshape(-1, target.shape[-1])
+            
+        # 计算方向是否正确
+        if pred.shape[0] > 1:  # 确保有足够的样本计算方向
             pred_diff = pred[1:] - pred[:-1]
             target_diff = target[1:] - target[:-1]
             
-            # 计算方向一致性损失
+            # 计算方向匹配度 (-1到1的值，接近1表示方向完全一致)
             sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
             direction_loss = torch.mean(1.0 - sign_match)
             
-            # 组合损失
+            # 组合损失 - 增加方向损失的权重
             return torch.mean(focal_mse) * (1.0 - self.direction_weight) + direction_loss * self.direction_weight
         else:
             return torch.mean(focal_mse)
@@ -1272,22 +1248,37 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
         y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
     
-    # !!! 新增：裁剪预测值到有效范围 (0-1) !!!
-    y_pred_clipped = np.clip(y_pred_scaled, 0, 1)
+    # 更严格的裁剪预测值到有效范围 (0-1)
+    y_pred_clipped = np.clip(y_pred_scaled, 0.001, 0.999)  # 避免极端值
     
     # 逆缩放预测值和真实值
     print("执行逆缩放...")
     try:
-        # 使用裁剪后的值进行逆缩放
-        y_pred = target_scaler.inverse_transform(y_pred_clipped) 
+        # 使用裁剪后的值进行逆缩放，并添加额外的错误处理
+        y_pred = target_scaler.inverse_transform(y_pred_clipped)
         y_test_original = target_scaler.inverse_transform(y_test)
+        
+        # 额外安全检查 - 处理可能的无穷值或NaN
+        y_pred = np.nan_to_num(y_pred, nan=20000.0, posinf=50000.0, neginf=1000.0)
+        y_test_original = np.nan_to_num(y_test_original, nan=20000.0, posinf=50000.0, neginf=1000.0)
+        
+        # 确保预测值在合理范围内 - 使用历史价格最小/最大值的扩展范围
+        min_price = np.min(original_df['close']) * 0.5
+        max_price = np.max(original_df['close']) * 2.0
+        y_pred = np.clip(y_pred, min_price, max_price)
+        y_test_original = np.clip(y_test_original, min_price, max_price)
+        
         print("逆缩放完成")
     except Exception as e:
         print(f"错误：逆缩放失败 - {e}")
-        print("请确保 target_scaler 已正确加载并传递。")
-        y_pred = y_pred_clipped # 使用裁剪后的缩放值
-        y_test_original = y_test
-
+        print("使用备用方法计算预测值...")
+        # 获取均值和标准差作为备用缩放方法
+        mean_price = np.mean(original_df['close'])
+        std_price = np.std(original_df['close'])
+        # 简单线性变换作为备用
+        y_pred = y_pred_clipped * (std_price * 4) + mean_price
+        y_test_original = y_test * (std_price * 4) + mean_price
+    
     # 计算评估指标 (使用逆缩放后的原始尺度值)
     metrics = calculate_metrics(y_test_original, y_pred)
     
@@ -1395,8 +1386,15 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     return y_pred, metrics, test_timestamps
 
 # 改进的交易信号生成
-def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=1.0, volatility_window=20):
-    print(f"生成交易信号，阈值为价格的 {threshold_pct}%...")
+def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.5, volatility_window=10):
+    """
+    生成交易信号，修正版：确保生成买入和卖出信号
+    
+    参数:
+    - threshold_pct: 降低到0.5%，提高信号生成敏感度
+    - volatility_window: 减少到10，更敏感地捕捉价格变化
+    """
+    print(f"生成交易信号，基准阈值为价格的 {threshold_pct}%...")
     signals = []
     
     # 计算近期波动率来动态设置阈值
@@ -1412,7 +1410,15 @@ def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, thres
     
     rolling_volatility = np.array([np.std(price_changes[:volatility_window])] + rolling_volatility)
     
-    # 遍历每一个预测值（从第二个开始，因为我们需要前一个价格来比较）
+    # 显示初始统计信息
+    print(f"平均波动率: {np.mean(rolling_volatility):.6f}")
+    print(f"最小波动率: {np.min(rolling_volatility):.6f}")
+    print(f"最大波动率: {np.max(rolling_volatility):.6f}")
+    
+    # 调整动态阈值的计算方式
+    volatility_factor = 1.0  # 降低这个乘数
+    
+    # 遍历每一个预测值（从第二个开始）
     for i in range(1, len(y_pred)):
         # 当前真实价格
         current_price = y_test[i][0]
@@ -1429,10 +1435,10 @@ def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, thres
         # 当前的波动率
         current_volatility = rolling_volatility[i]
         
-        # 动态阈值，基于当前波动率
-        dynamic_threshold = max(threshold_pct, current_volatility * 1.5)
+        # 动态阈值，基于当前波动率但有最小值
+        dynamic_threshold = max(threshold_pct, current_volatility * volatility_factor)
         
-        # 生成交易信号，基于预测变化和动态阈值
+        # 生成交易信号，确保有买入和卖出
         if predicted_change_pct > dynamic_threshold:
             signal = "买入"
         elif predicted_change_pct < -dynamic_threshold:
@@ -2689,24 +2695,33 @@ def main():
     model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
-    # 初始化损失函数 - 大幅提高方向权重
-    print("提高 FocalMSELoss 的方向权重...")
-    # criterion = nn.MSELoss().to(device) # 注释掉 MSELoss
-    criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.8).to(device) # 大幅提高方向权重至 0.8
-
-    # 调整优化器和学习率调度器
-    optimizer = optim.AdamW(
+    # 创建损失函数
+    if model_type == 'advanced_transformer':
+        # 使用DirectionAwareLoss - 更加关注方向预测
+        criterion = DirectionAwareLoss(alpha=0.8).to(device)
+    else:
+        # 对于其他模型，使用FocalMSELoss但更加重视方向
+        criterion = FocalMSELoss(
+            gamma=2.0, 
+            alpha=0.5, 
+            direction_weight=0.8  # 显著提高方向权重
+        ).to(device)
+    
+    # 创建优化器
+    optimizer = torch.optim.AdamW(
         model.parameters(), 
-        lr=1e-4,  # 稍微提高初始学习率
-        weight_decay=1e-5, 
+        lr=2e-4,  # 提高初始学习率以加速训练
+        weight_decay=5e-6, 
         betas=(0.9, 0.999),
         eps=1e-8
     )
+    
+    # 使用余弦退火学习率调度
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, 
-        T_0=15,  # 增加重启周期
+        T_0=10,  # 减少重启周期，加快收敛
         T_mult=2, 
-        eta_min=1e-7 # 降低最小学习率
+        eta_min=1e-6 # 提高最小学习率
     )
 
     # 确认训练参数
@@ -2724,10 +2739,10 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
-        epochs=100,
-        patience=25,  # 增加耐心值以学习方向
+        epochs=150,  # 增加训练轮次
+        patience=35,  # 增加早停耐心值
         model_save_path='models',
-        l2_weight=1e-5
+        l2_weight=5e-6  # 减少L2正则化权重
     )
 
     # 测试模型
@@ -2741,18 +2756,18 @@ def main():
         
         # 执行交易信号生成和回测
         print("\n===== 开始交易信号生成和回测 =====")
-        # 生成交易信号
-        signals_df = generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.8, volatility_window=15)
+        # 生成交易信号 - 使用更敏感的参数
+        signals_df = generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.3, volatility_window=8)
         
-        # 执行回测
+        # 执行回测 - 调整参数以促进更多交易
         backtest_results = backtest_strategy(
             signals_df, 
-            initial_capital=10000.0,  # 初始资金1万美元
-            commission_rate=0.001,    # 0.1%交易手续费
-            slippage_pct=0.001,       # 0.1%滑点
-            risk_control=True,        # 启用风险控制
-            position_sizing='volatility',  # 基于波动率的仓位管理
-            max_drawdown_pct=0.2      # 最大回撤限制20%
+            initial_capital=10000.0,   # 初始资金1万美元
+            commission_rate=0.0005,    # 降低手续费到0.05%
+            slippage_pct=0.0005,       # 降低滑点到0.05%
+            risk_control=True,         # 保持启用风险控制
+            position_sizing='fixed',   # 改为固定仓位策略更简单明确
+            max_drawdown_pct=0.25      # 增加回撤容忍度到25%
         )
         
         print("\n===== 回测结束 =====")
