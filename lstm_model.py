@@ -334,7 +334,7 @@ class FocalMSELoss(nn.Module):
         self.alpha = alpha
         self.direction_weight = direction_weight
         self.eps = 1e-6  # 添加平滑因子，防止数值不稳定
-
+        
     def forward(self, pred, target):
         # 计算MSE
         mse = F.mse_loss(pred, target, reduction='none')
@@ -651,21 +651,21 @@ def load_training_data():
     else:
         # 使用原有的特征生成逻辑
         print("使用自动生成的特征列表")
-        final_features = list(set([f for f in generated_features if f in df.columns])) # 只使用成功生成的特征
+    final_features = list(set([f for f in generated_features if f in df.columns])) # 只使用成功生成的特征
     
     # 确保至少有一些特征可用
     if len(final_features) == 0:
         print("错误: 没有可用特征! 将使用基本特征集")
         # 回退到基本特征集
         final_features = [col for col in ['open', 'high', 'low', 'volume'] if col in df.columns]
-    
+
     # 如果 target_col 是特征之一，从 final_features 中移除
     if target_col in final_features:
         final_features.remove(target_col)
 
     print(f"最终使用的特征数量: {len(final_features)}")
     print(f"最终特征列表: {final_features}")
-    
+
     if target_col not in df.columns:
         print(f"错误：目标列 '{target_col}' 不在DataFrame中！")
         return None, None, None, None, None
@@ -715,7 +715,7 @@ def load_training_data():
     target_scaler = RobustScaler() # 目标缩放器 - 改为 RobustScaler
     scaled_target = target_scaler.fit_transform(target_data)
     print("目标变量缩放完成")
-
+    
     # 创建序列数据
     X, y = [], []
     # 确保索引不越界
@@ -986,337 +986,244 @@ def calculate_metrics(y_true, y_pred):
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, 
                 epochs=100, patience=20, model_save_path='models', l2_weight=1e-5):
     """
-    训练循环
+    训练模型并保存最佳模型
+    支持早停和学习率调度
     """
-    import os
-    import time
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from torch.cuda.amp import autocast, GradScaler
-    from torch.utils.tensorboard import SummaryWriter
-    
-    # 创建模型保存目录
-    os.makedirs(model_save_path, exist_ok=True)
-    writer = SummaryWriter(log_dir='logs')
-    
-    # 混合精度训练
-    scaler = GradScaler(init_scale=8192.0)  # 降低初始scale以减少溢出风险
-    
-    # 训练历史记录
-    train_losses = []
-    val_losses = []
-    # 移除 train_dir_accs
-    val_dir_accs = []
-    lrs = []
-    
-    # 优化梯度累积步数
-    accumulation_steps = 2  # 减少累积以提高利用率
-    
-    # 早停设置
+    # 初始化性能跟踪变量
     best_val_loss = float('inf')
     early_stop_counter = 0
-    best_model_path = os.path.join(model_save_path, 'best_lstm_model.pth')
+    train_losses = []
+    val_losses = []
+    val_dir_accs = []
     
-    print(f"开始训练，总计训练 {epochs} 轮...")
+    # 确保model_save_path目录存在
+    os.makedirs(model_save_path, exist_ok=True)
+    
+    # 创建tensorboard日志记录器
+    log_dir = os.path.join(model_save_path, 'logs', datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir)
+    
+    # 创建梯度缩放器 (支持混合精度训练)
+    scaler = GradScaler()
+    
     start_time = time.time()
     
-    for epoch in range(epochs):
+    # 主训练循环
+    print(f"开始训练，总计训练 {epochs} 轮...")
+    for epoch in range(1, epochs + 1):
         # 训练阶段
         model.train()
-        train_loss = 0.0
-        # 移除 train_dir_acc = 0.0
+        train_loss = 0
         batch_times = []
-        samples_processed = 0
+        samples_per_sec_list = []
         
-        # 内存优化
-        torch.cuda.empty_cache()
+        # 每个epoch前重置性能监控变量
         epoch_start = time.time()
+        batch_start = time.time()
         
-        for i, (inputs, targets) in enumerate(train_loader):
-            batch_start = time.time()
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
             
-            # 将数据移动到设备(GPU/CPU)
-            inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+            # 清除梯度
+            optimizer.zero_grad()
             
-            # 前向传播（使用混合精度训练）
-            with autocast():
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
+            # 使用自动混合精度
+            with autocast(enabled=device=='cuda'):
+                output = model(data)
                 
-                # 添加L2正则化惩罚
-                l2_penalty = 0.0
-                for param in model.parameters():
-                    l2_penalty += torch.norm(param, 2)
-                loss += l2_weight * l2_penalty
+                # 计算损失 (包括L2正则化)
+                loss = criterion(output, target)
                 
-                # 梯度累积，缩放损失
-                loss = loss / accumulation_steps
+                # 添加L2正则化 (手动实现，更灵活)
+                if l2_weight > 0:
+                    l2_reg = 0.0
+                    for param in model.parameters():
+                        l2_reg += torch.norm(param, 2)
+                    loss += l2_weight * l2_reg
             
-            # 反向传播（使用混合精度）
+            # 反向传播 (使用梯度缩放)
             scaler.scale(loss).backward()
             
-            # 移除训练集方向准确率计算部分
-            # with torch.no_grad():
-            #     if i < len(train_loader) - 1:  # 确保有下一个batch
-            #         # 获取下一个batch
-            #         next_inputs, next_targets = next(iter(train_loader))
-            #         next_inputs, next_targets = next_inputs.to(device, non_blocking=True), next_targets.to(device, non_blocking=True)
-            #         next_outputs = model(next_inputs)
-            #
-            #         # 计算预测方向和实际方向
-            #         pred_diff = (outputs - next_outputs) > 0
-            #         true_diff = (targets - next_targets) > 0
-            #
-            #         # 计算方向准确率
-            #         dir_acc = (pred_diff == true_diff).float().mean().item()
-            #         train_dir_acc += dir_acc
+            # 梯度裁剪，防止梯度爆炸
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
-            # 梯度累积更新
-            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
-                # 添加梯度裁剪，防止梯度爆炸
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # 使用scaler更新权重
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)  # 更高效的梯度清零
-                
-                # 更新学习率调度器 - 对于OneCycleLR，每批次都要更新
-                scheduler.step()
+            # 更新权重 (使用梯度缩放)
+            scaler.step(optimizer)
+            scaler.update()
             
-            # 记录训练损失
-            train_loss += loss.item() * accumulation_steps
+            # 累加损失
+            train_loss += loss.item() * data.size(0)
             
-            # 更新批次计时和吞吐量记录
+            # 性能监控
             batch_end = time.time()
             batch_time = batch_end - batch_start
             batch_times.append(batch_time)
+            samples_per_second = data.size(0) / batch_time
+            samples_per_sec_list.append(samples_per_second)
             
-            samples_in_batch = inputs.size(0)
-            samples_processed += samples_in_batch
+            # 重置批次开始时间
+            batch_start = time.time()
             
-            # 每10批次报告一次GPU使用情况
-            if (i + 1) % 10 == 0 and torch.cuda.is_available():
-                gpu_util = get_gpu_utilization()
-                gpu_mem = get_gpu_memory()
-                cpu_util = get_cpu_utilization()
-                memory_util = get_memory_utilization()
-                
-                # 计算近期批处理时间和吞吐量
-                recent_times = batch_times[-10:]
-                avg_recent_time = sum(recent_times) / len(recent_times)
-                throughput = samples_in_batch / avg_recent_time
-                
-                print(f"\rGPU {gpu_util}% {throughput:.1f} samples/s, 批处理时间: {avg_recent_time:.4f}s,显存: {gpu_mem}", end="          ")
-                
-                # 定期报告详细信息
-                if (i + 1) % 50 == 0:
-                    print()
-                    print(f"GPU {gpu_util}")
-                    print(f"GPU 显存占用: {gpu_mem}")
-                    print(f"CPU 使用率: {cpu_util}%, 内存使用率: {memory_util}%")
-        
-        # 计算平均批次时间和吞吐量
-        epoch_end = time.time()
-        epoch_time = epoch_end - epoch_start
-        avg_batch_time = sum(batch_times) / len(batch_times)
-        avg_samples_per_sec = samples_processed / epoch_time
-        
-        print(f"轮次 {epoch+1} 性能指标: 总样本数: {samples_processed}, 总时间: {epoch_time:.2f}s")
-        print(f"平均吞吐量: {avg_samples_per_sec:.1f} samples/s, 平均批处理时间: {avg_batch_time:.4f}s")
-        
         # 计算平均训练损失
-        avg_train_loss = train_loss / len(train_loader)
-        # 移除 avg_train_dir_acc 计算
+        train_loss /= len(train_loader.dataset)
+        train_losses.append(train_loss)
         
-        train_losses.append(avg_train_loss)
-        # 移除 train_dir_accs.append(avg_train_dir_acc)
+        # 保存到tensorboard
+        writer.add_scalar('Loss/train', train_loss, epoch)
+        writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], epoch)
         
         # 验证阶段
         model.eval()
-        val_loss = 0.0
-        # 移除 val_dir_acc = 0.0
+        val_loss = 0
         all_val_preds = []
         all_val_targets = []
         
         with torch.no_grad():
-            for i, (inputs, targets) in enumerate(val_loader):
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-                val_loss += loss.item()
+            for data, target in val_loader:
+                data, target = data.to(device), target.to(device)
                 
-                # 收集预测值和目标值
-                all_val_preds.append(outputs.cpu().numpy())
-                all_val_targets.append(targets.cpu().numpy())
+                with autocast(enabled=device=='cuda'):
+                    output = model(data)
+                    # 计算验证损失 (不包括L2正则化)
+                    loss = criterion(output, target)
                 
-                # 移除旧的验证集方向准确率计算
-                # if i < len(val_loader) - 1:  # 确保有下一个batch
-                #     # 获取下一个batch
-                #     next_inputs, next_targets = next(iter(val_loader))
-                #     next_inputs, next_targets = next_inputs.to(device), next_targets.to(device)
-                #     next_outputs = model(next_inputs)
-                #
-                #     # 计算预测方向和实际方向
-                #     pred_diff = (outputs - next_outputs) > 0
-                #     true_diff = (targets - next_targets) > 0
-                #
-                #     # 计算方向准确率
-                #     dir_acc = (pred_diff == true_diff).float().mean().item()
-                #     val_dir_acc += dir_acc
+                val_loss += loss.item() * data.size(0)
+                all_val_preds.append(output.cpu())
+                all_val_targets.append(target.cpu())
         
         # 计算平均验证损失
-        avg_val_loss = val_loss / len(val_loader)
-        val_losses.append(avg_val_loss)
-
-        # 计算验证集整体方向准确率
-        all_val_preds = np.concatenate(all_val_preds, axis=0)
-        all_val_targets = np.concatenate(all_val_targets, axis=0)
+        val_loss /= len(val_loader.dataset)
+        val_losses.append(val_loss)
         
+        # 保存到tensorboard
+        writer.add_scalar('Loss/validation', val_loss, epoch)
+        
+        # 计算方向预测准确率
+        all_val_preds = torch.cat(all_val_preds)
+        all_val_targets = torch.cat(all_val_targets)
+        
+        # 计算验证集的方向准确率
         if len(all_val_preds) > 1:
-            # 检查数据形状，处理多维数据
-            if len(all_val_preds.shape) > 2:
-                # 3D数据 [batch, seq_len, features]
+            # 确定数据结构 (批次和序列)
+            if len(all_val_preds.shape) > 2:  # 3D: [batch, seq, feature]
                 batch_size, seq_len, _ = all_val_preds.shape
-                direction_matches = 0
-                valid_comparisons = 0
                 
-                # 对每个序列分别计算方向准确率
-                for i in range(batch_size):
-                    seq_pred = all_val_preds[i]
-                    seq_target = all_val_targets[i]
+                # 如果有序列维度，计算每个序列内的方向变化
+                if seq_len > 1:
+                    # 计算每个样本每个序列位置的方向预测准确率
+                    correct_dirs = 0
+                    total_dirs = 0
                     
-                    # 计算序列内的方向变化
-                    pred_diff = np.diff(seq_pred, axis=0).reshape(-1)
-                    target_diff = np.diff(seq_target, axis=0).reshape(-1)
+                    for i in range(batch_size):
+                        # 提取序列
+                        seq_pred = all_val_preds[i]
+                        seq_target = all_val_targets[i]
+                        
+                        # 计算连续点之间的差值
+                        pred_diff = seq_pred[1:] - seq_pred[:-1]
+                        target_diff = seq_target[1:] - seq_target[:-1]
+                        
+                        # 计算非零变化的索引 (忽略平值)
+                        valid_idx = (target_diff != 0)
+                        
+                        if valid_idx.sum() > 0:
+                            # 方向是否匹配 (符号相同)
+                            dir_match = (torch.sign(pred_diff) == torch.sign(target_diff))
+                            correct_dirs += dir_match[valid_idx].sum().item()
+                            total_dirs += valid_idx.sum().item()
                     
-                    # 计算方向符号
-                    pred_sign = np.sign(pred_diff)
-                    target_sign = np.sign(target_diff)
-                    
-                    # 只考虑非零方向变化
-                    valid_indices = (target_sign != 0) & (pred_sign != 0)
-                    
-                    if np.sum(valid_indices) > 0:
-                        # 计算方向匹配数量
-                        matches = np.sum((pred_sign[valid_indices] == target_sign[valid_indices]))
-                        direction_matches += matches
-                        valid_comparisons += np.sum(valid_indices)
-                
-                if valid_comparisons > 0:
-                    avg_val_dir_acc = (direction_matches / valid_comparisons) * 100
+                    # 计算总体方向准确率
+                    val_dir_acc = correct_dirs / total_dirs * 100 if total_dirs > 0 else 50.0
                 else:
-                    avg_val_dir_acc = 50.0  # 默认随机水平
+                    # 没有序列维度，视为批次数据
+                    val_dir_acc = 50.0  # 默认值
             else:
-                # 2D数据 [batch, features]
-                pred_diff = np.diff(all_val_preds, axis=0).reshape(-1)
-                target_diff = np.diff(all_val_targets, axis=0).reshape(-1)
+                # 2D数据 [batch, feature]
+                # 计算相邻样本间的差异
+                pred_diff = all_val_preds[1:] - all_val_preds[:-1]
+                target_diff = all_val_targets[1:] - all_val_targets[:-1]
                 
-                # 计算方向符号
-                pred_sign = np.sign(pred_diff)
-                target_sign = np.sign(target_diff)
+                # 只考虑目标有明确变化方向的点
+                valid_idx = (target_diff != 0).flatten()
                 
-                # 只考虑非零方向变化
-                valid_indices = (target_sign != 0) & (pred_sign != 0)
-                
-                if np.sum(valid_indices) > 0:
-                    # 计算方向匹配度
-                    matches = (pred_sign[valid_indices] == target_sign[valid_indices])
-                    avg_val_dir_acc = np.mean(matches) * 100
+                if valid_idx.sum() > 0:
+                    # 找出方向预测正确的比例
+                    dir_match = (torch.sign(pred_diff) == torch.sign(target_diff)).flatten()
+                    val_dir_acc = dir_match[valid_idx].float().mean().item() * 100
                 else:
-                    avg_val_dir_acc = 50.0
+                    val_dir_acc = 50.0
         else:
-            avg_val_dir_acc = 50.0  # 样本不足，默认随机水平
+            val_dir_acc = 50.0  # 如果验证集太小，使用默认值
+        
+        val_dir_accs.append(val_dir_acc)
+        
+        # 保存到tensorboard
+        writer.add_scalar('Metrics/direction_accuracy', val_dir_acc, epoch)
+        
+        # 计算本轮训练的平均性能指标
+        avg_batch_time = np.mean(batch_times)
+        avg_samples_per_sec = np.mean(samples_per_sec_list)
+        
+        # 更新学习率 - 使用验证损失作为指标！
+        scheduler.step(val_loss)  # 这里修复 - 为ReduceLROnPlateau提供metrics参数
+        
+        # 显示进度信息，包括方向准确率
+        print(f"轮次 [{epoch}/{epochs}], 训练损失: {train_loss:.6f}, 验证损失: {val_loss:.6f}, 验证方向准确率: {val_dir_acc:.2f}%, "
+              f"学习率: {optimizer.param_groups[0]['lr']:.6f}")
+        
+        if epoch % 1 == 0:  # 每轮显示性能指标
+            # 获取GPU利用率和内存
+            if device == 'cuda':
+                gpu_util = torch.cuda.utilization(0)
+                gpu_mem = torch.cuda.memory_allocated()/1e6
+                gpu_total = torch.cuda.get_device_properties(0).total_memory/1e6
+                
+                print(f"GPU {gpu_util}%% {avg_samples_per_sec:.1f} samples/s, 批处理时间: {avg_batch_time:.4f}s,"
+                      f"显存: {gpu_mem/1000:.2f}GB / {gpu_total/1000:.2f}GB", end="")
             
-        val_dir_accs.append(avg_val_dir_acc / 100)  # 记录为 0-1 的比例值
+            # 计算更多性能指标
+            samples = len(train_loader.dataset)
+            elapsed = time.time() - epoch_start
+            print(f"          轮次 {epoch} 性能指标: 总样本数: {samples}, 总时间: {elapsed:.2f}s")
+            print(f"平均吞吐量: {samples/elapsed:.1f} samples/s, 平均批处理时间: {avg_batch_time:.4f}s")
         
-        # 学习率调度器步进 - 修复缩进
-        current_lr = optimizer.param_groups[0]['lr']
-        lrs.append(current_lr)
-        
-        # 记录到TensorBoard
-        writer.add_scalar('Loss/train', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val', avg_val_loss, epoch)
-        # 移除 writer.add_scalar('DirectionAccuracy/train', avg_train_dir_acc, epoch)
-        writer.add_scalar('DirectionAccuracy/val', avg_val_dir_acc, epoch) # 记录百分比
-        writer.add_scalar('LearningRate', current_lr, epoch)
-        
-        # 打印训练进度
-        print() # 在打印轮次总结前添加换行，确保从新行开始
-        print(f"轮次 [{epoch+1}/{epochs}], 训练损失: {avg_train_loss:.6f}, 验证损失: {avg_val_loss:.6f}, 验证方向准确率: {avg_val_dir_acc:.2f}%, 学习率: {current_lr:.6f}")
-        
-        # 检查是否需要保存最佳模型
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        # 检查是否为最佳模型
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             early_stop_counter = 0
             
             # 保存最佳模型
-            os.makedirs(model_save_path, exist_ok=True)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': best_val_loss,
-                'train_loss': avg_train_loss,
-                'learning_rate': current_lr
-            }, best_model_path)
-            print(f"模型改进！保存检查点到 {best_model_path}")
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'val_dir_acc': val_dir_acc
+            }, f'{model_save_path}/best_lstm_model.pth')
+            
+            print(f"验证损失改善至 {best_val_loss:.6f}. 模型已保存!")
         else:
             early_stop_counter += 1
             print(f"验证损失未改善。早停计数器: {early_stop_counter}/{patience}")
             
-            # 在early_stop_counter += 1之后添加以下代码
-            # 检查损失值是否异常高，如果是则降低学习率
-            if epoch > 5 and avg_val_loss > 1e6:
-                print(f"警告：损失值异常偏高({avg_val_loss:.1f})，可能需要检查数据预处理。降低学习率尝试恢复...")
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= 0.5  # 减半学习率
-            
-            # 如果连续多轮未改善，提前停止训练
             if early_stop_counter >= patience:
                 print(f"早停：{patience} 轮未见改善")
                 break
     
-    # 训练后可视化
-    plt.figure(figsize=(15, 15))
-    
-    plt.subplot(3, 1, 1)
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Final Training and Validation Loss') # Changed title
-    plt.legend()
-    plt.grid(True)
-    
-    plt.subplot(3, 1, 2)
-    # plt.plot(train_dir_accs, label='Training Direction Accuracy') # Removed line
-    plt.plot(val_dir_accs, label='Validation Direction Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (0-1)')
-    plt.title('Final Validation Set Direction Prediction Accuracy') # Changed title
-    plt.legend()
-    plt.grid(True)
-    
-    plt.subplot(3, 1, 3)
-    plt.plot(lrs, label='Learning Rate') # Added label
-    plt.xlabel('Epoch')
-    plt.ylabel('Learning Rate')
-    plt.title('Final Learning Rate Schedule') # Changed title
-    plt.legend() # Added legend
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(f"{model_save_path}/final_training_curves.png")
-    plt.close()
-    
-    print(f"训练完成！总计耗时: {(time.time() - start_time)/60:.2f} 分钟")
+    # 计算总训练时间
+    total_time = time.time() - start_time
+    print(f"训练完成！总计耗时: {total_time/60:.2f} 分钟")
     print(f"最佳验证损失: {best_val_loss:.6f}")
     
+    # 关闭tensorboard writer
+    writer.close()
+    
     # 加载最佳模型
-    checkpoint = torch.load(best_model_path, weights_only=False) # Explicitly set weights_only=False
-    model.load_state_dict(checkpoint['model_state_dict'])
+    best_model_data = torch.load(f'{model_save_path}/best_lstm_model.pth')
+    model.load_state_dict(best_model_data['model_state_dict'])
     
     return model, train_losses, val_losses, val_dir_accs
 
@@ -1599,7 +1506,7 @@ def generate_trading_signals(y_test_original, y_pred, test_timestamps, original_
             signal = "卖出"
         else:
             signal = "持有"
-            
+        
         # 通过置信度调整信号，提高多样性
         # 对于低置信度的预测，增加生成"持有"信号的概率
         if confidence < 0.5 and np.random.random() < 0.7 * (1-confidence):
@@ -1884,7 +1791,7 @@ class TimeSeriesAugmentation:
         self.noise_level = noise_level
         self.scale_range = scale_range
         self.jitter_prob = jitter_prob
-    
+        
     def add_noise(self, x):
         """添加高斯噪声"""
         noise = np.random.normal(0, self.noise_level, x.shape)
@@ -2876,7 +2783,7 @@ def main():
     
     # 学习率调度器：ReduceLROnPlateau
     scheduler = ReduceLROnPlateau(
-        optimizer, 
+        optimizer,
         mode='min',          # 监控最小化验证损失
         factor=0.5,          # 每次降低一半学习率
         patience=10,         # 10轮没有改善就降低学习率
