@@ -341,49 +341,65 @@ class FocalMSELoss(nn.Module):
         weight = self.alpha * (1 - torch.exp(-mse)) ** self.gamma
         focal_mse = weight * mse
         
-        # 获取连续预测序列的方向 - 考虑使用变化
-        # 如果batch中有多个序列，需要reshape
-        if len(pred.shape) > 2:
+        # 计算方向损失部分
+        batch_size = pred.size(0)
+        
+        # 初始化方向损失
+        direction_loss = torch.tensor(0.0, device=pred.device)
+        
+        # 获取连续预测序列的方向
+        if len(pred.shape) > 2:  # 存在序列维度
             batch_size, seq_len, _ = pred.shape
-            pred_reshaped = pred.reshape(batch_size * seq_len, -1)
-            target_reshaped = target.reshape(batch_size * seq_len, -1)
             
-            # 重新排列以保留序列内部的连续性
-            if batch_size > 1 and seq_len > 1:
-                # 按序列排列，而不是按批次
-                pred_continuous = pred_reshaped.reshape(batch_size, seq_len, -1)
-                target_continuous = target_reshaped.reshape(batch_size, seq_len, -1)
-                
-                # 计算每个序列内的方向变化
-                direction_losses = []
+            # 如果序列长度大于1，计算每个序列内的方向变化
+            if seq_len > 1:
                 for i in range(batch_size):
-                    seq_pred = pred_continuous[i]
-                    seq_target = target_continuous[i]
+                    seq_pred = pred[i]
+                    seq_target = target[i]
                     
+                    # 计算连续点之间的差值
                     pred_diff = seq_pred[1:] - seq_pred[:-1]
                     target_diff = seq_target[1:] - seq_target[:-1]
                     
-                    # 计算方向匹配度
-                    sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
-                    seq_direction_loss = torch.mean(1.0 - sign_match)
-                    direction_losses.append(seq_direction_loss)
-                
-                direction_loss = torch.mean(torch.stack(direction_losses))
-                return torch.mean(focal_mse) * (1.0 - self.direction_weight) + direction_loss * self.direction_weight
-        
-        # 标准处理（没有明确的序列维度）
-        if pred.shape[0] > 1:  # 确保有足够的样本计算方向
-            pred_diff = pred[1:] - pred[:-1]
-            target_diff = target[1:] - target[:-1]
+                    # 计算方向是否一致（符号相同）
+                    pred_sign = torch.sign(pred_diff)
+                    target_sign = torch.sign(target_diff)
+                    
+                    # 找出非零方向变化的点（避免平值的干扰）
+                    valid_indices = (target_sign != 0) & (pred_sign != 0)
+                    
+                    if valid_indices.sum() > 0:
+                        # 计算方向不匹配的比例作为损失
+                        match = (pred_sign == target_sign).float()
+                        seq_dir_loss = 1.0 - torch.mean(match[valid_indices])
+                        direction_loss += seq_dir_loss
             
-            # 计算方向匹配度
-            sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
-            direction_loss = torch.mean(1.0 - sign_match)
-            
-            # 组合损失 - 增加方向损失的权重
-            return torch.mean(focal_mse) * (1.0 - self.direction_weight) + direction_loss * self.direction_weight
+                # 平均每个批次的方向损失
+                if batch_size > 0:
+                    direction_loss = direction_loss / batch_size
         else:
-            return torch.mean(focal_mse)
+            # 处理没有序列维度的情况
+            if batch_size > 1:
+                pred_diff = pred[1:] - pred[:-1]
+                target_diff = target[1:] - target[:-1]
+                
+                # 计算方向是否一致
+                pred_sign = torch.sign(pred_diff)
+                target_sign = torch.sign(target_diff)
+                
+                # 找出非零方向变化的点
+                valid_indices = (target_sign != 0) & (pred_sign != 0)
+                
+                if valid_indices.sum() > 0:
+                    # 计算方向不匹配的比例作为损失
+                    match = (pred_sign == target_sign).float()
+                    direction_loss = 1.0 - torch.mean(match[valid_indices])
+        
+        # 计算最终损失
+        focal_mse_mean = torch.mean(focal_mse)
+        total_loss = (1 - self.direction_weight) * focal_mse_mean + self.direction_weight * direction_loss
+        
+        return total_loss
 
 # 加载模型训练数据
 def load_training_data():
@@ -1166,28 +1182,59 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         all_val_targets = np.concatenate(all_val_targets, axis=0)
         
         if len(all_val_preds) > 1:
-            # 优化方向准确率计算
-            pred_shapes = all_val_preds.shape
-            
-            # 检查数据维度
-            if len(pred_shapes) >= 2:
-                # 将所有数据平铺成一维数组进行连续方向计算
-                val_direction_true = np.sign(np.diff(all_val_targets.reshape(-1)))
-                val_direction_pred = np.sign(np.diff(all_val_preds.reshape(-1)))
+            # 检查数据形状，处理多维数据
+            if len(all_val_preds.shape) > 2:
+                # 3D数据 [batch, seq_len, features]
+                batch_size, seq_len, _ = all_val_preds.shape
+                direction_matches = 0
+                valid_comparisons = 0
                 
-                # 计算符号匹配的百分比
-                matches = (val_direction_true == val_direction_pred)
-                non_zero_indices = (val_direction_true != 0) & (val_direction_pred != 0)
-                
-                if np.sum(non_zero_indices) > 0:
+                # 对每个序列分别计算方向准确率
+                for i in range(batch_size):
+                    seq_pred = all_val_preds[i]
+                    seq_target = all_val_targets[i]
+                    
+                    # 计算序列内的方向变化
+                    pred_diff = np.diff(seq_pred, axis=0).reshape(-1)
+                    target_diff = np.diff(seq_target, axis=0).reshape(-1)
+                    
+                    # 计算方向符号
+                    pred_sign = np.sign(pred_diff)
+                    target_sign = np.sign(target_diff)
+                    
                     # 只考虑非零方向变化
-                    avg_val_dir_acc = np.mean(matches[non_zero_indices]) * 100
+                    valid_indices = (target_sign != 0) & (pred_sign != 0)
+                    
+                    if np.sum(valid_indices) > 0:
+                        # 计算方向匹配数量
+                        matches = np.sum((pred_sign[valid_indices] == target_sign[valid_indices]))
+                        direction_matches += matches
+                        valid_comparisons += np.sum(valid_indices)
+                
+                if valid_comparisons > 0:
+                    avg_val_dir_acc = (direction_matches / valid_comparisons) * 100
                 else:
-                    avg_val_dir_acc = 50.0  # 如果没有明确的方向变化，假设为随机水平
+                    avg_val_dir_acc = 50.0  # 默认随机水平
             else:
-                avg_val_dir_acc = 50.0
+                # 2D数据 [batch, features]
+                pred_diff = np.diff(all_val_preds, axis=0).reshape(-1)
+                target_diff = np.diff(all_val_targets, axis=0).reshape(-1)
+                
+                # 计算方向符号
+                pred_sign = np.sign(pred_diff)
+                target_sign = np.sign(target_diff)
+                
+                # 只考虑非零方向变化
+                valid_indices = (target_sign != 0) & (pred_sign != 0)
+                
+                if np.sum(valid_indices) > 0:
+                    # 计算方向匹配度
+                    matches = (pred_sign[valid_indices] == target_sign[valid_indices])
+                    avg_val_dir_acc = np.mean(matches) * 100
+                else:
+                    avg_val_dir_acc = 50.0
         else:
-            avg_val_dir_acc = 50.0  # 样本不足，无法计算方向
+            avg_val_dir_acc = 50.0  # 样本不足，默认随机水平
             
         val_dir_accs.append(avg_val_dir_acc / 100)  # 记录为 0-1 的比例值
         
