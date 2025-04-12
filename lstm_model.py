@@ -944,7 +944,7 @@ def calculate_metrics(y_true, y_pred):
     # 确保长度一致且大于0
     if len(direction_true) > 0 and len(direction_true) == len(direction_pred):
         # 只考虑非零变化的方向
-        valid_indices = (direction_true != 0) & (direction_pred != 0)
+        valid_indices = (direction_true != 0)
         if np.sum(valid_indices) > 0:
             direction_accuracy = np.mean(np.sign(direction_true[valid_indices]) == np.sign(direction_pred[valid_indices])) * 100
         else:
@@ -1029,7 +1029,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             optimizer.zero_grad()
             
             # 使用自动混合精度
-            with autocast(enabled=device=='cuda'):
+            with autocast(device_type='cuda' if device=='cuda' else 'cpu', enabled=device=='cuda'):
                 output = model(data)
                 
                 # 计算损失 (包括L2正则化)
@@ -1084,7 +1084,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             for data, target in val_loader:
                 data, target = data.to(device), target.to(device)
                 
-                with autocast(enabled=device=='cuda'):
+                with autocast(device_type='cuda' if device=='cuda' else 'cpu', enabled=device=='cuda'):
                     output = model(data)
                     # 计算验证损失 (不包括L2正则化)
                     loss = criterion(output, target)
