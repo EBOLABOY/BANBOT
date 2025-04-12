@@ -395,13 +395,15 @@ def load_training_data():
     torch.set_num_threads(os.cpu_count())
     
     # 尝试加载预处理数据（如果存在）
-    cache_file = 'data/processed_data_cache_v2.npz' # 使用新的缓存文件名
-    scaler_file = 'data/scaler_v2.pkl'
+    cache_file = 'data/processed_data_cache_v2.npz'
+    scaler_file = 'data/scaler_v2.pkl' # 特征缩放器
+    target_scaler_file = 'data/target_scaler_v2.pkl' # 目标缩放器文件
     original_df_file = 'data/original_df_v2.csv'
     feature_info_file = 'data/model_ready/enhanced_feature_info_v2.json'
 
-    if os.path.exists(cache_file) and os.path.exists(scaler_file) and os.path.exists(original_df_file):
-        print(f"找到预处理数据缓存，直接加载: {cache_file}")
+    # 检查所有必需的缓存文件是否存在
+    if os.path.exists(cache_file) and os.path.exists(scaler_file) and os.path.exists(target_scaler_file) and os.path.exists(original_df_file):
+        print(f"找到预处理数据缓存，直接加载: {cache_file}, {scaler_file}, {target_scaler_file}")
         try:
             data = np.load(cache_file, allow_pickle=True)
             X_train = data['X_train']
@@ -410,12 +412,16 @@ def load_training_data():
             y_val = data['y_val']
             X_test = data['X_test']
             y_test = data['y_test']
-            scaler = joblib.load(scaler_file)
+            feature_scaler = joblib.load(scaler_file) # 加载特征缩放器
+            target_scaler = joblib.load(target_scaler_file) # 加载目标缩放器
             print("成功加载预处理数据缓存!")
             original_df = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
-            return (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler, original_df
+            # !!! 确保返回6个值 !!!
+            return (X_train, y_train), (X_val, y_val), (X_test, y_test), feature_scaler, target_scaler, original_df
         except Exception as e:
             print(f"加载缓存文件失败: {e}，将重新处理数据")
+    else:
+        print("缓存文件不完整或不存在，将重新处理数据...") # 提示缓存不完整
     
     # 读取数据文件并预处理
     print("从原始数据文件处理特征...")
@@ -689,6 +695,7 @@ def load_training_data():
              X_val=X_val, y_val=y_val, 
              X_test=X_test, y_test=y_test)
     joblib.dump(scaler, scaler_file)
+    joblib.dump(target_scaler, target_scaler_file)
     df.to_csv(original_df_file)
     
     print("数据处理完成!")
@@ -700,11 +707,6 @@ def load_training_data():
     
     # 加载保存的原始DataFrame以供后续使用
     original_df_loaded = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
-    
-    # !!! 保存目标缩放器 !!!
-    target_scaler_file = 'data/target_scaler_v2.pkl'
-    joblib.dump(target_scaler, target_scaler_file)
-    print(f"目标缩放器已保存到 {target_scaler_file}")
     
     return (X_train, y_train), (X_val, y_val), (X_test, y_test), feature_scaler, target_scaler, original_df_loaded
 
@@ -1189,17 +1191,20 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
         y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
     
-    # !!! 新增：逆缩放预测值和真实值 !!!
+    # !!! 新增：裁剪预测值到有效范围 (0-1) !!!
+    y_pred_clipped = np.clip(y_pred_scaled, 0, 1)
+    
+    # 逆缩放预测值和真实值
     print("执行逆缩放...")
     try:
-        y_pred = target_scaler.inverse_transform(y_pred_scaled) # 逆缩放预测值
-        y_test_original = target_scaler.inverse_transform(y_test) # 逆缩放测试集真实值
+        # 使用裁剪后的值进行逆缩放
+        y_pred = target_scaler.inverse_transform(y_pred_clipped) 
+        y_test_original = target_scaler.inverse_transform(y_test)
         print("逆缩放完成")
     except Exception as e:
         print(f"错误：逆缩放失败 - {e}")
         print("请确保 target_scaler 已正确加载并传递。")
-        # 使用缩放后的值进行评估（不推荐，但作为后备）
-        y_pred = y_pred_scaled
+        y_pred = y_pred_clipped # 使用裁剪后的缩放值
         y_test_original = y_test
 
     # 计算评估指标 (使用逆缩放后的原始尺度值)
@@ -2587,30 +2592,31 @@ def main():
     model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
-    # 初始化损失函数
-    print("使用简单的 MSELoss 进行初始训练...")
-    criterion = nn.MSELoss().to(device) # 暂时切换到MSELoss
-    # criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.3).to(device)
-    
-    # 初始化优化器 - 增加权重衰减
+    # 初始化损失函数 - 切换回 FocalMSELoss
+    print("切换回 FocalMSELoss...")
+    # criterion = nn.MSELoss().to(device) # 注释掉 MSELoss
+    criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.4).to(device) # 稍增加方向权重
+
+    # 调整优化器和学习率调度器
     optimizer = optim.AdamW(
         model.parameters(), 
-        lr=5e-5,  # 确认使用降低后的学习率
-        weight_decay=1e-5,  # 确认使用轻微正则化
+        lr=1e-4,  # 稍微提高初始学习率
+        weight_decay=1e-5, 
         betas=(0.9, 0.999),
         eps=1e-8
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, 
-        T_0=10,  # 确认使用每10轮重启
-        T_mult=2,  # 确认使用周期翻倍
-        eta_min=1e-6  # 确认使用最小学习率
+        T_0=15,  # 增加重启周期
+        T_mult=2, 
+        eta_min=1e-7 # 降低最小学习率
     )
-    
+
     # 确认训练参数
+    print(f"损失函数: {type(criterion).__name__}, alpha: {getattr(criterion, 'alpha', 'N/A')}, direction_weight: {getattr(criterion, 'direction_weight', 'N/A')}")
     print(f"优化器: AdamW, 初始学习率: {optimizer.param_groups[0]['lr']:.1e}, 权重衰减: {optimizer.param_groups[0]['weight_decay']:.1e}")
     print(f"学习率调度器: CosineAnnealingWarmRestarts, T_0: {scheduler.T_0}, T_mult: {scheduler.T_mult}, eta_min: {scheduler.eta_min:.1e}")
-    
+
     # 训练模型
     print("\n开始模型训练...")
     trained_model, train_losses, val_losses, val_dir_accs = train_model(
@@ -2622,15 +2628,21 @@ def main():
         scheduler=scheduler,
         device=device,
         epochs=100,
-        patience=15,
+        patience=25,  # 增加耐心值以学习方向
         model_save_path='models',
-        l2_weight=1e-4  # 同样增加L2正则化强度
+        l2_weight=1e-5
     )
-    
+
     # 测试模型
-    checkpoint = torch.load('models/best_lstm_model.pth', weights_only=False) # Explicitly set weights_only=False
+    checkpoint = torch.load('models/best_lstm_model.pth', weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
-    test_model(model, X_test, y_test, target_scaler, original_df, len(original_df) - len(X_test), device) # 传递 target_scaler
+    # 加载对应的 target_scaler
+    target_scaler_path = 'data/target_scaler_v2.pkl'
+    if os.path.exists(target_scaler_path):
+        target_scaler_loaded = joblib.load(target_scaler_path)
+        test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
+    else:
+        print(f"错误: 找不到目标缩放器 {target_scaler_path}，无法进行测试评估。")
     
     # 输出性能优化总结
     print("\n==== 性能优化总结 ====")
