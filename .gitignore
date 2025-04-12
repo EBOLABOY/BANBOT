@@ -60,6 +60,7 @@ Thumbs.db
 .idea/
 
 # Data files (通常很大，不适合直接上传)
+data/
 # data/processed/*.csv
 # data/model_ready/*.joblib # 取消注释如果你不想上传scaler
 
