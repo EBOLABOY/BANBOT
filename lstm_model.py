@@ -856,21 +856,9 @@ def calculate_metrics(y_true, y_pred):
 
 # 训练模型
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, 
-                epochs=100, patience=15, model_save_path='models', l2_weight=1e-4):
+                epochs=100, patience=20, model_save_path='models', l2_weight=1e-5):
     """
     训练循环
-    :param model: 模型
-    :param train_loader: 训练数据加载器
-    :param val_loader: 验证数据加载器
-    :param criterion: 损失函数
-    :param optimizer: 优化器
-    :param scheduler: 学习率调度器
-    :param device: 设备(GPU/CPU)
-    :param epochs: 轮次数
-    :param patience: 早停耐心值
-    :param model_save_path: 模型保存路径
-    :param l2_weight: L2正则化强度
-    :return: tuple (训练后的模型, 训练损失历史, 验证损失历史, 验证方向准确率历史)
     """
     import os
     import time
@@ -1083,60 +1071,31 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         print(f"轮次 [{epoch+1}/{epochs}], 训练损失: {avg_train_loss:.6f}, 验证损失: {avg_val_loss:.6f}, 验证方向准确率: {avg_val_dir_acc:.2f}%, 学习率: {current_lr:.6f}")
         
         # 检查是否需要保存最佳模型
-        if avg_val_loss < best_val_loss * (1.0 - 1e-4): # 添加最小改善阈值 (0.01%)
+        if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             early_stop_counter = 0
             
-            print(f"模型改进！保存检查点到 {best_model_path}")
-            
-            # 保存模型
+            # 保存最佳模型
+            os.makedirs(model_save_path, exist_ok=True)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': best_val_loss,
                 'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-                # 移除 'train_dir_acc': avg_train_dir_acc,
-                'val_dir_acc': avg_val_dir_acc / 100, # 保存比例值
-                'scheduler_state_dict': scheduler.state_dict(),
+                'learning_rate': current_lr
             }, best_model_path)
-            
-            # 可视化当前最佳模型
-            if epoch > 0 and epoch % 5 == 0:
-                plt.figure(figsize=(15, 15))
-                
-                plt.subplot(3, 1, 1)
-                plt.plot(train_losses, label='Training Loss')
-                plt.plot(val_losses, label='Validation Loss')
-                plt.xlabel('Epoch')
-                plt.ylabel('Loss')
-                plt.title('Training and Validation Loss')
-                plt.legend()
-                plt.grid(True)
-                
-                plt.subplot(3, 1, 2)
-                # plt.plot(train_dir_accs, label='Training Direction Accuracy') # Removed line
-                plt.plot(val_dir_accs, label='Validation Direction Accuracy')
-                plt.xlabel('Epoch')
-                plt.ylabel('Accuracy (0-1)')
-                plt.title('Validation Set Direction Prediction Accuracy')
-                plt.legend()
-                plt.grid(True)
-                
-                plt.subplot(3, 1, 3)
-                plt.plot(lrs, label='Learning Rate') # Added label
-                plt.xlabel('Epoch')
-                plt.ylabel('Learning Rate')
-                plt.title('Learning Rate Schedule')
-                plt.legend() # Added legend
-                plt.grid(True)
-                
-                plt.tight_layout()
-                plt.savefig(f"{model_save_path}/training_curves_epoch_{epoch+1}.png")
-                plt.close()
+            print(f"模型改进！保存检查点到 {best_model_path}")
         else:
             early_stop_counter += 1
             print(f"验证损失未改善。早停计数器: {early_stop_counter}/{patience}")
+            
+            # 在early_stop_counter += 1之后添加以下代码
+            # 检查损失值是否异常高，如果是则降低学习率
+            if epoch > 5 and avg_val_loss > 1e6:
+                print(f"警告：损失值异常偏高({avg_val_loss:.1f})，可能需要检查数据预处理。降低学习率尝试恢复...")
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] *= 0.5  # 减半学习率
             
             # 如果连续多轮未改善，提前停止训练
             if early_stop_counter >= patience:
@@ -1578,11 +1537,14 @@ class TimeSeriesAugmentation:
     3. 时间扭曲（Time Warping）
     4. 窗口滑动
     """
-    def __init__(self, noise_level=0.01, scale_range=(0.95, 1.05), jitter_prob=0.3):
+    def __init__(self, 
+                 noise_level=0.008,  # 降低噪声
+                 scale_range=(0.97, 1.03),  # 缩小缩放范围 
+                 jitter_prob=0.2):  # 降低扰动概率
         self.noise_level = noise_level
         self.scale_range = scale_range
         self.jitter_prob = jitter_prob
-        
+    
     def add_noise(self, x):
         """添加高斯噪声"""
         noise = np.random.normal(0, self.noise_level, x.shape)
@@ -1637,7 +1599,7 @@ class TimeSeriesAugmentation:
         return x_aug if y is None else (x_aug, y)
 
 # 创建增强数据集
-def create_augmented_dataset(X, y, num_augmentations=1):
+def create_augmented_dataset(X, y, num_augmentations=2):  # 从3减到2
     """创建数据增强后的数据集
     
     参数:
