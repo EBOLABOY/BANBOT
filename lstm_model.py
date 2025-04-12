@@ -327,11 +327,11 @@ class FocalMSELoss(nn.Module):
     """
     结合了方向预测的MSE损失，专注于难例并重点关注方向预测
     """
-    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.9):
+    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.6): # !!! 降低方向权重 !!!
         super(FocalMSELoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
-        self.direction_weight = direction_weight  # 增加方向权重到0.9
+        self.direction_weight = direction_weight
     
     def forward(self, pred, target):
         # 计算MSE
@@ -1659,7 +1659,8 @@ def backtest_strategy(signals_df, initial_capital=10000.0, commission_rate=0.001
         timestamp = row['timestamp']
         price = row['current_price']
         signal = row['signal']
-        volatility = row['volatility']
+        # !!! 使用正确的列名 volatility_abs !!!
+        volatility = row['volatility_abs'] 
         
         # 计算信号可信度 - 基于预测变化与阈值的比例
         pred_change_pct = abs(row['predicted_change_pct'])
@@ -2785,13 +2786,13 @@ def main():
     criterion = FocalMSELoss(
         gamma=2.0, 
         alpha=0.5, 
-        direction_weight=0.9  # 保持高方向权重
+        direction_weight=0.6  # !!! 降低方向权重 !!!
     ).to(device)
     
     # 创建优化器
     optimizer = torch.optim.AdamW(
         model.parameters(), 
-        lr=2e-4,  # 提高初始学习率以加速训练
+        lr=5e-5,  # !!! 进一步降低初始学习率 !!!
         weight_decay=5e-6, 
         betas=(0.9, 0.999),
         eps=1e-8
