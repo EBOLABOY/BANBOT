@@ -458,9 +458,26 @@ def load_training_data():
     # 创建数据集文件夹（如果不存在）
     os.makedirs('data/model_ready', exist_ok=True)
     
-    # 按序列长度和批次大小进行高效处理
-    sequence_length = 30  
+    # 优先从feature_info.json中读取序列长度
+    sequence_length = 30  # 默认值作为回退
     prediction_horizon = 1
+    
+    # 尝试从特征文件读取序列长度
+    try:
+        if os.path.exists(feature_info_file):
+            with open(feature_info_file, 'r') as f:
+                feature_info_data = json.load(f)
+                if 'sequence_length' in feature_info_data and isinstance(feature_info_data['sequence_length'], int):
+                    sequence_length = feature_info_data['sequence_length']
+                    print(f"从特征文件读取序列长度: {sequence_length}")
+                if 'prediction_horizon' in feature_info_data and isinstance(feature_info_data['prediction_horizon'], int):
+                    prediction_horizon = feature_info_data['prediction_horizon']
+                    print(f"从特征文件读取预测周期: {prediction_horizon}")
+    except Exception as e:
+        print(f"读取特征文件时出错: {e}，将使用默认序列长度: {sequence_length}")
+        
+    print(f"使用序列长度: {sequence_length}, 预测周期: {prediction_horizon}")
+    
     train_ratio = 0.7
     val_ratio = 0.15
     
@@ -742,6 +759,7 @@ def load_training_data():
         'features': final_features,
         'target': target_col,
         'sequence_length': sequence_length,
+        'prediction_horizon': prediction_horizon,
         'binance_features_added': binance_api_features # 记录添加的币安特征
     }
     with open(feature_info_file, 'w') as f:
@@ -2521,11 +2539,27 @@ class AdvancedLSTMTransformerModel(nn.Module):
         
         return out
 
+def set_seed(seed):
+    """设置随机种子以确保结果可复现"""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 # 主函数
 def main():
     # 设置随机种子，确保结果可复现
-    torch.manual_seed(42)
-    np.random.seed(42)
+    set_seed(42)
+    
+    # 是否禁用数据增强
+    disable_augmentation = True
+    
+    # 检查环境
+    check_environment()
+    print("==== 环境检查完成 ====\n")
     
     # 选择设备 (GPU / CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -2566,18 +2600,23 @@ def main():
     print(f"训练集大小: {X_train.shape}, 验证集大小: {X_val.shape}, 测试集大小: {X_test.shape}")
     
     # 数据增强 - 基于硬件容量决定增强策略
-    if torch.cuda.is_available():
-        mem_gb = torch.cuda.get_device_properties(0).total_memory/1e9
-        if mem_gb > 10:  # 超过10GB显存
-            print(f"显存充足({mem_gb:.1f}GB)，启用数据增强...")
-            aug_factor = min(int(mem_gb / 4), 4)  # 根据显存大小决定增强倍数
-            X_train_aug, y_train_aug = create_augmented_dataset(X_train, y_train, num_augmentations=aug_factor)
-            X_train = np.concatenate([X_train, X_train_aug], axis=0)
-            y_train = np.concatenate([y_train, y_train_aug], axis=0)
-            print(f"数据增强后训练集大小: {X_train.shape}")
+    mem_gb = get_gpu_memory() / 1024 if torch.cuda.is_available() else 0
+    
+    if disable_augmentation:
+        print("数据增强功能已禁用，使用原始数据进行训练")
+        X_train_aug, y_train_aug = X_train, y_train
+    elif mem_gb >= 8:
+        print(f"显存充足({mem_gb:.1f}GB)，启用数据增强...")
+        aug_factor = min(int(mem_gb / 4), 4)  # 根据显存大小决定增强倍数
+        X_train_aug, y_train_aug = create_augmented_dataset(X_train, y_train, num_augmentations=aug_factor)
+    else:
+        print("显存不足(<8GB)，跳过数据增强步骤")
+        X_train_aug, y_train_aug = X_train, y_train
+    
+    print(f"数据增强后训练集大小: {X_train_aug.shape}")
     
     # 创建PyTorch数据集
-    train_dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
+    train_dataset = TensorDataset(torch.FloatTensor(X_train_aug), torch.FloatTensor(y_train_aug))
     val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val))
     
     # 使用DataLoader加载数据
@@ -2608,38 +2647,33 @@ def main():
     if torch.cuda.is_available():
         mem_gb = torch.cuda.get_device_properties(0).total_memory/1e9
         
-        if mem_gb > 11 and X_train.shape[0] > 100000:
+        if mem_gb > 11 and X_train_aug.shape[0] > 100000:
             print(f"高端GPU检测到 ({mem_gb:.1f}GB)，使用高性能Transformer模型")
             model = AdvancedLSTMTransformerModel(
-                input_size=input_size,
-                seq_len=seq_len,
-                hidden_size=hidden_size,
-                num_lstm_layers=4,
+                input_size=X_train.shape[2], 
+                seq_len=X_train.shape[1],
+                hidden_size=512, 
+                num_lstm_layers=4, 
                 num_transformer_layers=4,
                 nhead=16,
                 dropout=0.5
             ).to(device)
-            model_type = "advanced_transformer"
+            model_type = 'advanced_transformer'
         elif mem_gb > 8:
-            print(f"中端GPU检测到 ({mem_gb:.1f}GB)，使用LSTM-Transformer混合模型")
+            print(f"中端GPU检测到 ({mem_gb:.1f}GB)，使用标准Transformer模型")
             model = EnhancedLSTMTransformerModel(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                num_layers=3,
-                dropout=0.4,
-                nhead=8,
+                input_size=X_train.shape[2], 
+                hidden_size=256, 
+                num_layers=3, 
+                dropout=0.3,
+                nhead=8, 
                 transformer_layers=2
             ).to(device)
-            model_type = "hybrid"
+            model_type = 'transformer'
         else:
-            print(f"标准GPU检测到 ({mem_gb:.1f}GB)，使用LSTM模型")
-            model = EnhancedLSTMModel(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                num_layers=4,
-                dropout=0.4
-            ).to(device)
-            model_type = "lstm"
+            print(f"基础GPU/CPU检测到 ({mem_gb:.1f}GB)，使用LSTM模型")
+            model = EnhancedLSTMModel(input_size=X_train.shape[2]).to(device)
+            model_type = 'lstm'
     else:
         print("未检测到GPU，使用轻量级LSTM模型")
         model = EnhancedLSTMModel(
@@ -2703,7 +2737,25 @@ def main():
     target_scaler_path = 'data/target_scaler_v2.pkl'
     if os.path.exists(target_scaler_path):
         target_scaler_loaded = joblib.load(target_scaler_path)
-        test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
+        y_pred, metrics, test_timestamps = test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
+        
+        # 执行交易信号生成和回测
+        print("\n===== 开始交易信号生成和回测 =====")
+        # 生成交易信号
+        signals_df = generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.8, volatility_window=15)
+        
+        # 执行回测
+        backtest_results = backtest_strategy(
+            signals_df, 
+            initial_capital=10000.0,  # 初始资金1万美元
+            commission_rate=0.001,    # 0.1%交易手续费
+            slippage_pct=0.001,       # 0.1%滑点
+            risk_control=True,        # 启用风险控制
+            position_sizing='volatility',  # 基于波动率的仓位管理
+            max_drawdown_pct=0.2      # 最大回撤限制20%
+        )
+        
+        print("\n===== 回测结束 =====")
     else:
         print(f"错误: 找不到目标缩放器 {target_scaler_path}，无法进行测试评估。")
     
