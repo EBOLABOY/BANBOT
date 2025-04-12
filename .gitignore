@@ -1,0 +1,83 @@
+# Python相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 环境和设置
+.env
+.venv
+venv/
+ENV/
+trading_env/
+
+# 虚拟环境
+trading_env/
+
+# 日志文件
+*.log
+
+# 数据文件（按需修改）
+# data/*.csv
+
+# 模型文件（可能很大）
+# models/*.pth
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# VS Code相关
+.vscode/
+.idea/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# Data files (通常很大，不适合直接上传)
+# data/processed/*.csv
+# data/model_ready/*.joblib # 取消注释如果你不想上传scaler
+
+# Model artifacts (通常很大，且是运行生成的)
+models/
+*.pth
+*.pt
+*.joblib
+*.onnx
+logs/
+*.png
+# *.csv # 忽略 models 文件夹下的 csv
+
+# 添加其他你不想上传的文件或文件夹
+# data/raw/
+
+# data/processed_data_cache.npz
+
+# Cache files
+*.npz
+*.pkl 

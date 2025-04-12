@@ -1,0 +1,37 @@
+{
+    "features": [
+        "sma_50",
+        "funding_rate_change",
+        "atr",
+        "funding_rate",
+        "taker_buy_ratio",
+        "taker_volume",
+        "volume_ma5",
+        "funding_rate_ma3",
+        "cci",
+        "sma_20",
+        "volatility",
+        "log_return",
+        "volatility_30d",
+        "price_momentum",
+        "taker_volume_ma5",
+        "volume_ratio",
+        "rsi",
+        "sentiment",
+        "taker_buy_sell_ratio",
+        "fear_greed",
+        "trend_signal",
+        "volume_ma10"
+    ],
+    "target": "close",
+    "sequence_length": 30,
+    "binance_features_added": [
+        "funding_rate",
+        "funding_rate_ma3",
+        "funding_rate_change",
+        "taker_volume",
+        "taker_buy_sell_ratio",
+        "taker_buy_ratio",
+        "taker_volume_ma5"
+    ]
+}

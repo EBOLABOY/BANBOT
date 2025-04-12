@@ -1,0 +1,1 @@
+{"features": ["high", "close_time", "volatility", "cum_volume_12h", "close"], "target": "close", "sequence_length": 24, "prediction_horizon": 1}

@@ -1,0 +1,9 @@
+python-binance
+pandas 
+numpy
+matplotlib
+seaborn
+scikit-learn
+ta
+torch
+python-dotenv
