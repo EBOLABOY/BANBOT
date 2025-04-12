@@ -413,7 +413,7 @@ def load_training_data():
     # 尝试加载预处理数据（如果存在）
     cache_file = 'data/processed_data_cache_v2.npz'
     scaler_file = 'data/scaler_v2.pkl' # 特征缩放器
-    target_scaler_file = 'data/target_scaler_v2.pkl' # 目标缩放器文件
+    target_scaler_file = 'data/target_scaler_v2.pkl' # 目标缩放器文件 - !!! 更新为 RobustScaler !!!
     original_df_file = 'data/original_df_v2.csv'
     feature_info_file = 'data/model_ready/feature_info.json' # 修改为使用feature_info.json
 
@@ -456,7 +456,7 @@ def load_training_data():
                 X_test = data['X_test']
                 y_test = data['y_test']
                 feature_scaler = joblib.load(scaler_file) # 加载特征缩放器
-                target_scaler = joblib.load(target_scaler_file) # 加载目标缩放器
+                target_scaler = joblib.load(target_scaler_file) # 加载目标缩放器 - 改为 RobustScaler
                 print("成功加载预处理数据缓存!")
                 original_df = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
                 # !!! 确保返回6个值 !!!
@@ -737,9 +737,9 @@ def load_training_data():
     scaled_features = np.nan_to_num(scaled_features, nan=0.0, posinf=3.0, neginf=-3.0)
     print("增强特征缩放完成")
 
-    # !!! 新增：缩放目标变量 Y !!!
-    print("应用目标变量缩放 (MinMaxScaler)...")
-    target_scaler = MinMaxScaler(feature_range=(0, 1)) # 目标缩放器
+    # !!! 修改：使用 RobustScaler 缩放目标变量 Y !!!
+    print("应用目标变量缩放 (RobustScaler)...")
+    target_scaler = RobustScaler() # 目标缩放器 - 改为 RobustScaler
     scaled_target = target_scaler.fit_transform(target_data)
     print("目标变量缩放完成")
 
@@ -792,7 +792,7 @@ def load_training_data():
              X_val=X_val, y_val=y_val, 
              X_test=X_test, y_test=y_test)
     joblib.dump(scaler, scaler_file)
-    joblib.dump(target_scaler, target_scaler_file)
+    joblib.dump(target_scaler, target_scaler_file) # 保存 RobustScaler
     df.to_csv(original_df_file)
     
     print("数据处理完成!")
@@ -967,16 +967,36 @@ def calculate_metrics(y_true, y_pred):
     # 计算方向准确率 (DA) - 预测方向与实际方向一致的比例
     direction_true = np.diff(y_true.flatten())
     direction_pred = np.diff(y_pred.flatten())
-    direction_accuracy = np.mean((direction_true > 0) == (direction_pred > 0)) * 100
+    
+    # 确保长度一致且大于0
+    if len(direction_true) > 0 and len(direction_true) == len(direction_pred):
+        # 只考虑非零变化的方向
+        valid_indices = (direction_true != 0) & (direction_pred != 0)
+        if np.sum(valid_indices) > 0:
+            direction_accuracy = np.mean(np.sign(direction_true[valid_indices]) == np.sign(direction_pred[valid_indices])) * 100
+        else:
+            direction_accuracy = 50.0 # 如果没有有效方向变化，默认为50%
+    else:
+        direction_accuracy = 0.0
     
     # 计算相关系数
     correlation = np.corrcoef(y_true.flatten(), y_pred.flatten())[0, 1]
     
-    # 计算上升趋势预测准确率
-    up_acc = np.mean(((direction_true > 0) & (direction_pred > 0))) * 100
+    # 计算上升趋势预测准确率 - !!! 修正计算方式 !!!
+    actual_ups = (direction_true > 0)
+    predicted_ups = (direction_pred > 0)
+    if np.sum(actual_ups) > 0:
+        up_acc = np.sum(actual_ups & predicted_ups) / np.sum(actual_ups) * 100
+    else:
+        up_acc = 0.0 # 或设置为 NaN 或其他标记值
     
-    # 计算下降趋势预测准确率
-    down_acc = np.mean(((direction_true < 0) & (direction_pred < 0))) * 100
+    # 计算下降趋势预测准确率 - !!! 修正计算方式 !!!
+    actual_downs = (direction_true < 0)
+    predicted_downs = (direction_pred < 0)
+    if np.sum(actual_downs) > 0:
+        down_acc = np.sum(actual_downs & predicted_downs) / np.sum(actual_downs) * 100
+    else:
+        down_acc = 0.0 # 或设置为 NaN 或其他标记值
     
     return {
         'mse': mse,
@@ -1336,19 +1356,19 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
         y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
     
-    # 更严格的裁剪预测值到有效范围 (0-1)
-    y_pred_clipped = np.clip(y_pred_scaled, 0.001, 0.999)  # 避免极端值
+    # 移除裁剪步骤，因为 RobustScaler 对异常值不敏感
+    # y_pred_clipped = np.clip(y_pred_scaled, 0.001, 0.999)
     
-    # 逆缩放预测值和真实值
+    # 逆缩放预测值和真实值 - !!! 使用 RobustScaler !!!
     print("执行逆缩放...")
     try:
-        # 使用裁剪后的值进行逆缩放，并添加额外的错误处理
-        y_pred = target_scaler.inverse_transform(y_pred_clipped)
+        # 使用 RobustScaler 进行逆缩放
+        y_pred = target_scaler.inverse_transform(y_pred_scaled)
         y_test_original = target_scaler.inverse_transform(y_test)
         
-        # 额外安全检查 - 处理可能的无穷值或NaN
-        y_pred = np.nan_to_num(y_pred, nan=20000.0, posinf=50000.0, neginf=1000.0)
-        y_test_original = np.nan_to_num(y_test_original, nan=20000.0, posinf=50000.0, neginf=1000.0)
+        # 额外安全检查 - 处理可能的无穷值或NaN (保留)
+        y_pred = np.nan_to_num(y_pred, nan=np.nanmean(y_test_original), posinf=np.nanmax(y_test_original)*2, neginf=np.nanmin(y_test_original)*0.5)
+        y_test_original = np.nan_to_num(y_test_original, nan=np.nanmean(y_test_original))
         
         # 确保预测值在合理范围内 - 使用历史价格最小/最大值的扩展范围
         min_price = np.min(original_df['close']) * 0.5
@@ -1364,7 +1384,7 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
         mean_price = np.mean(original_df['close'])
         std_price = np.std(original_df['close'])
         # 简单线性变换作为备用
-        y_pred = y_pred_clipped * (std_price * 4) + mean_price
+        y_pred = y_pred_scaled * (std_price * 4) + mean_price
         y_test_original = y_test * (std_price * 4) + mean_price
     
     # 计算评估指标 (使用逆缩放后的原始尺度值)
@@ -1471,22 +1491,24 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     print(f"\n价格预测对比图已保存到 models/price_prediction_comparison.png")
     print(f"滚动窗口指标已保存到 models/rolling_*_metrics.csv")
     
-    return y_pred, metrics, test_timestamps
+    return y_pred, metrics, test_timestamps, y_test_original
 
 # 改进的交易信号生成
-def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.5, volatility_window=10):
+def generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df, threshold_pct=0.5, volatility_window=10):
     """
-    生成交易信号，修正版：确保生成买入和卖出信号
+    生成交易信号，修正版：确保生成买入和卖出信号，并在原始价格尺度上计算
     
     参数:
+    - y_test_original: 原始价格尺度的真实值
+    - y_pred: 原始价格尺度的预测值
     - threshold_pct: 降低到0.5%，提高信号生成敏感度
     - volatility_window: 减少到10，更敏感地捕捉价格变化
     """
-    print(f"生成交易信号，基准阈值为价格的 {threshold_pct}%...")
+    print(f"生成交易信号（基于原始价格尺度），基准阈值为价格的 {threshold_pct}%...")
     signals = []
     
-    # 计算近期波动率来动态设置阈值
-    price_changes = np.diff(y_test.flatten())
+    # 计算近期波动率来动态设置阈值 - !!! 基于原始价格 y_test_original !!!
+    price_changes = np.diff(y_test_original.flatten()) # 使用原始价格计算变化
     rolling_volatility = []
     
     for i in range(len(price_changes)):
@@ -1494,42 +1516,52 @@ def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, thres
             window = price_changes[:i+1]
         else:
             window = price_changes[i-volatility_window+1:i+1]
+        # 计算标准差作为波动率（原始价格尺度）
         rolling_volatility.append(np.std(window))
     
-    rolling_volatility = np.array([np.std(price_changes[:volatility_window])] + rolling_volatility)
+    # 确保 rolling_volatility 长度与 y_pred 一致
+    if len(rolling_volatility) < len(y_pred):
+        rolling_volatility = [rolling_volatility[0]] * (len(y_pred) - len(rolling_volatility)) + rolling_volatility
+    else:
+        rolling_volatility = rolling_volatility[:len(y_pred)]
+        
+    rolling_volatility = np.array(rolling_volatility)
     
     # 显示初始统计信息
-    print(f"平均波动率: {np.mean(rolling_volatility):.6f}")
-    print(f"最小波动率: {np.min(rolling_volatility):.6f}")
-    print(f"最大波动率: {np.max(rolling_volatility):.6f}")
+    print(f"平均波动率 (原始价格): {np.mean(rolling_volatility):.2f}")
+    print(f"最小波动率: {np.min(rolling_volatility):.2f}")
+    print(f"最大波动率: {np.max(rolling_volatility):.2f}")
     
     # 调整动态阈值的计算方式
     volatility_factor = 1.0  # 降低这个乘数
     
     # 遍历每一个预测值（从第二个开始）
     for i in range(1, len(y_pred)):
-        # 当前真实价格
-        current_price = y_test[i][0]
+        # 当前真实价格 (原始尺度)
+        current_price = y_test_original[i][0]
         
-        # 上一个真实价格
-        previous_price = y_test[i-1][0]
+        # 上一个真实价格 (原始尺度)
+        previous_price = y_test_original[i-1][0]
         
-        # 预测的下一个价格
+        # 预测的下一个价格 (原始尺度)
         predicted_next_price = y_pred[i][0]
         
-        # 预测的价格变化百分比
-        predicted_change_pct = (predicted_next_price - current_price) / current_price * 100
+        # 预测的价格变化百分比 - !!! 基于原始价格计算 !!!
+        predicted_change_pct = (predicted_next_price - current_price) / current_price * 100 if current_price != 0 else 0
         
-        # 当前的波动率
+        # 当前的波动率 (原始价格尺度)
         current_volatility = rolling_volatility[i]
         
-        # 动态阈值，基于当前波动率但有最小值
-        dynamic_threshold = max(threshold_pct, current_volatility * volatility_factor)
+        # 动态阈值，基于当前波动率但有最小值 - !!! 阈值也是原始价格的百分比 !!!
+        dynamic_threshold_abs = max(current_price * (threshold_pct / 100), current_volatility * volatility_factor)
         
-        # 生成交易信号，确保有买入和卖出
-        if predicted_change_pct > dynamic_threshold:
+        # 将绝对阈值转回百分比阈值（仅为记录和比较）
+        dynamic_threshold_pct = (dynamic_threshold_abs / current_price * 100) if current_price != 0 else threshold_pct
+        
+        # 生成交易信号，确保有买入和卖出 - !!! 使用百分比比较 !!!
+        if predicted_change_pct > dynamic_threshold_pct:
             signal = "买入"
-        elif predicted_change_pct < -dynamic_threshold:
+        elif predicted_change_pct < -dynamic_threshold_pct:
             signal = "卖出"
         else:
             signal = "持有"
@@ -1543,8 +1575,8 @@ def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, thres
             'current_price': current_price,
             'predicted_next_price': predicted_next_price,
             'predicted_change_pct': predicted_change_pct,
-            'volatility': current_volatility,
-            'dynamic_threshold': dynamic_threshold,
+            'volatility_abs': current_volatility, # 记录绝对波动率
+            'dynamic_threshold_pct': dynamic_threshold_pct, # 记录百分比阈值
             'signal': signal
         })
     
@@ -1585,8 +1617,8 @@ def generate_trading_signals(y_test, y_pred, test_timestamps, original_df, thres
     
     # 波动率和阈值图
     plt.subplot(2, 1, 2)
-    plt.plot(signals_df['timestamp'], signals_df['volatility'], label='Volatility', color='purple')
-    plt.plot(signals_df['timestamp'], signals_df['dynamic_threshold'], label='Dynamic Threshold', color='orange')
+    plt.plot(signals_df['timestamp'], signals_df['volatility_abs'], label='Volatility', color='purple')
+    plt.plot(signals_df['timestamp'], signals_df['dynamic_threshold_pct'], label='Dynamic Threshold', color='orange')
     plt.xlabel('Time')
     plt.ylabel('Percentage')
     plt.title('Volatility and Dynamic Threshold')
@@ -2801,12 +2833,12 @@ def main():
     target_scaler_path = 'data/target_scaler_v2.pkl'
     if os.path.exists(target_scaler_path):
         target_scaler_loaded = joblib.load(target_scaler_path)
-        y_pred, metrics, test_timestamps = test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
+        y_pred, metrics, test_timestamps, y_test_original = test_model(model, X_test, y_test, target_scaler_loaded, original_df, len(original_df) - len(X_test), device)
         
         # 执行交易信号生成和回测
         print("\n===== 开始交易信号生成和回测 =====")
-        # 生成交易信号 - 使用更敏感的参数
-        signals_df = generate_trading_signals(y_test, y_pred, test_timestamps, original_df, threshold_pct=0.3, volatility_window=8)
+        # 生成交易信号 - !!! 使用原始尺度的 y_test_original !!!
+        signals_df = generate_trading_signals(y_test_original, y_pred, test_timestamps, original_df, threshold_pct=0.3, volatility_window=8)
         
         # 执行回测 - 调整参数以促进更多交易
         backtest_results = backtest_strategy(
