@@ -2592,10 +2592,10 @@ def main():
     model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
-    # 初始化损失函数 - 切换回 FocalMSELoss
-    print("切换回 FocalMSELoss...")
+    # 初始化损失函数 - 大幅提高方向权重
+    print("提高 FocalMSELoss 的方向权重...")
     # criterion = nn.MSELoss().to(device) # 注释掉 MSELoss
-    criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.4).to(device) # 稍增加方向权重
+    criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.8).to(device) # 大幅提高方向权重至 0.8
 
     # 调整优化器和学习率调度器
     optimizer = optim.AdamW(
