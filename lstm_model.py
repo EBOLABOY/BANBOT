@@ -2600,7 +2600,7 @@ def main():
     print(f"训练集大小: {X_train.shape}, 验证集大小: {X_val.shape}, 测试集大小: {X_test.shape}")
     
     # 数据增强 - 基于硬件容量决定增强策略
-    mem_gb = get_gpu_memory() / 1024 if torch.cuda.is_available() else 0
+    mem_gb = torch.cuda.get_device_properties(0).total_memory/1e9 if torch.cuda.is_available() else 0
     
     if disable_augmentation:
         print("数据增强功能已禁用，使用原始数据进行训练")
