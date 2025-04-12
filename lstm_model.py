@@ -543,59 +543,110 @@ def load_training_data():
     # 注意：需要更仔细地处理，这里简单填充
     df = df.ffill().bfill() 
 
-    # 过滤异常数据 (在所有特征计算后)
-    initial_features = ['high', 'low', 'open', 'close', 'volume'] # 保留这些基础列以备用
-    # base_features = [f for f in feature_info['features'] if f in df.columns] # 移除对 feature_info 的依赖
-    generated_features = [
-        # 基础时间序列特征
-        'log_return', 'volatility_20', 'volatility_60', 
-        'volume_ma5', 'volume_ma20', 'volume_ratio',
-        # 技术指标
-        'atr_14', 'rsi_14', 'cci_20', 'sma_20', 'sma_50', 'trend_signal',
-        'ema_12', 'ema_26', 'macd_line', 'macd_signal', 'macd_hist',
-        'bb_percent_b', 'bb_bandwidth', 'stoch_k', 'stoch_d',
-        'williams_r', 'adx',
-        # 动量和情绪指标
-        'price_momentum_5', 'price_momentum_20',
-        'sentiment_vol_x_volatility', 'fear_greed_simple'
-    ] + binance_api_features
+    # 1. 定义用于特征选择的目标：未来1小时价格变化
+    df['future_price_change'] = df['close'].shift(-1) - df['close']
+    
+    # 2. 再次处理因 shift(-1) 产生的 NaN 以及之前步骤可能遗漏的 NaN
+    # 获取所有已生成的特征名称（包括旧的和币安的）
+    all_generated_features_before_new = list(set([f for f in generated_features if f in df.columns] + binance_api_features))
+    df = df.ffill().bfill() # 先填充
+    df.dropna(subset=[col for col in all_generated_features_before_new + ['future_price_change'] if col in df.columns], inplace=True)
+    df = df.ffill().bfill() # 再次填充以防万一
+    print("已定义用于特征选择的目标 'future_price_change'")
 
-    # all_features_to_check = base_features + generated_features # 不再需要 base_features
-    all_features_to_check = initial_features + generated_features # 检查初始列和生成列
-    df = df.dropna(subset=[col for col in all_features_to_check if col in df.columns])
+    # 3. 计算新的方向性特征
+    print("计算新的方向性特征...")
+    df['price_change_1'] = df['close'].pct_change(1) * 100 # 1周期价格变化百分比
+    df['price_change_3'] = df['close'].pct_change(3) * 100 # 3周期
+    # df['price_change_5'] = df['close'].pct_change(5) * 100 # 5周期 (与 price_momentum_5 重复，可选)
+    df['volatility_change_5'] = df['volatility_20'].diff(5) # 5周期波动率变化
+    if 'ema_12' in df.columns and 'ema_26' in df.columns:
+        df['ema_ratio'] = df['ema_12'] / (df['ema_26'] + 1e-9)
+    if 'macd_hist' in df.columns:
+        df['macd_hist_change'] = df['macd_hist'].diff()
+    if 'rsi_14' in df.columns:
+        df['rsi_change'] = df['rsi_14'].diff()
+    if 'volume' in df.columns:
+        df['volume_change_pct_1'] = df['volume'].pct_change(1) * 100
+    if 'taker_volume' in df.columns:
+        df['taker_volume_change_pct_1'] = df['taker_volume'].pct_change(1) * 100
+    if 'funding_rate_change' in df.columns:
+        df['funding_rate_change_smoothed'] = df['funding_rate_change'].rolling(3).mean() # 平滑资金费率变化
 
-    # 异常值处理 (对波动较大的新特征也处理)
-    cols_to_clip = [
-        # 波动率和基础指标
-        'volatility_20', 'volatility_60', 'volume_ratio', 
-        'log_return', 'price_momentum_5', 'price_momentum_20',
-        # 技术指标
-        'atr_14', 'rsi_14', 'cci_20', 
-        'macd_line', 'macd_signal', 'macd_hist',
-        'bb_percent_b', 'bb_bandwidth', 
-        'stoch_k', 'stoch_d', 'williams_r', 'adx',
-        # 情绪指标
-        'sentiment_vol_x_volatility',
-        # 币安API特征(如果存在)
-        'funding_rate', 'funding_rate_change', 'oi_change',
-        'taker_volume', 'taker_buy_sell_ratio'
+    # 将新特征添加到 generated_features 列表 (如果它们成功计算)
+    new_features = [
+        'price_change_1', 'price_change_3',
+        'volatility_change_5', 'ema_ratio', 'macd_hist_change', 'rsi_change',
+        'volume_change_pct_1', 'taker_volume_change_pct_1', 'funding_rate_change_smoothed'
     ]
+    calculated_new_features = []
+    for nf in new_features:
+        if nf in df.columns:
+            calculated_new_features.append(nf)
+            if nf not in generated_features:
+                generated_features.append(nf)
+            
+    # 再次处理新特征可能引入的 NaN
+    df = df.ffill().bfill()
+    # 在所有特征计算完毕后进行最终的 NaN 清理
+    final_feature_set_for_dropna = list(set(generated_features + ['future_price_change']))
+    df.dropna(subset=[col for col in final_feature_set_for_dropna if col in df.columns], inplace=True)
+    df = df.ffill().bfill()
+    print(f"已计算 {len(calculated_new_features)} 个新的方向性特征")
+
+    # 过滤异常数据 (在所有特征计算后，包括新特征)
+    # 更新需要检查的特征列表
+    all_features_to_check = list(set(initial_features + generated_features))
+    # 保持原有的异常值处理逻辑，确保覆盖新特征
+    cols_to_clip = [
+        # ... (保留原有的 cols_to_clip 列表) ...
+        # 添加新特征到裁剪列表 (如果它们波动可能较大)
+        'price_change_1', 'price_change_3', 'volatility_change_5',
+        'macd_hist_change', 'rsi_change', 'volume_change_pct_1',
+        'taker_volume_change_pct_1', 'funding_rate_change_smoothed'
+    ]
+    # 去重并确保列存在
+    cols_to_clip = list(set([col for col in cols_to_clip if col in df.columns]))
+    print(f"将对以下 {len(cols_to_clip)} 个特征进行异常值裁剪: {cols_to_clip[:5]}...")
     for col in cols_to_clip:
-        if col in df.columns:
-            q_low = df[col].quantile(0.005)
-            q_high = df[col].quantile(0.995)
-            df[col] = df[col].clip(lower=q_low, upper=q_high)
+        q_low = df[col].quantile(0.005)
+        q_high = df[col].quantile(0.995)
+        df[col] = df[col].clip(lower=q_low, upper=q_high)
+    print("异常值处理完成")
+    
+    # 4. 评估特征与未来价格变化的相关性
+    print("评估特征相关性...")
+    # 获取所有可用特征的列表（旧+新）
+    all_available_features = list(set(generated_features))
+    # 确保 'future_price_change' 存在用于计算相关性
+    if 'future_price_change' not in df.columns:
+        print("错误：无法计算相关性，'future_price_change' 列不存在")
+        # 可以选择返回错误或使用默认特征集
+        final_features = all_available_features # 使用所有特征作为后备
+    else:
+        # 计算皮尔逊相关系数
+        correlations = df[all_available_features + ['future_price_change']].corr()['future_price_change'].abs().sort_values(ascending=False)
+        
+        # 移除目标自身的相关性（如果存在）
+        correlations = correlations.drop('future_price_change', errors='ignore')
+        
+        # 5. 选择特征 (例如，选择相关性最高的 Top N 个)
+        num_selected_features = 25  # 选择前 25 个特征
+        selected_features = correlations.head(num_selected_features).index.tolist()
+        print(f"已选择 Top {num_selected_features} 个特征，基于与未来价格变化的相关性:")
+        print(correlations.head(num_selected_features))
+        
+        # 使用选择的特征作为最终特征集
+        final_features = selected_features
 
-    # 获取最终的特征列表和目标变量
-    # final_features = list(set([f for f in all_features_to_check if f in df.columns])) # 在下面重新定义 final_features
-    target_col = 'close'  # 直接定义目标列
-    # sequence_length = feature_info['sequence_length'] # 直接使用上面定义的 sequence_length = 30
-    final_features = list(set([f for f in generated_features if f in df.columns])) # 只使用成功生成的特征
-    # 确保基础列也在 (如果需要，但不作为输入特征)
-    # final_features = sorted(list(set(initial_features + final_features))) # 如果需要包含基础列用于检查
+    # --- 后续代码使用 final_features --- 
+    # 获取最终的特征列表和目标变量 (已被上面选择的特征覆盖)
+    # target_col = 'close' # 已在前面定义
+    # final_features = list(set([f for f in generated_features if f in df.columns])) # 注释掉这行，使用上面选择的 selected_features
 
-    # 如果 target_col 是特征之一，从 final_features 中移除
+    # 如果 target_col 意外地在选中的特征里，移除它
     if target_col in final_features:
+        print(f"警告: 目标列 '{target_col}' 出现在选定特征中，将其移除。")
         final_features.remove(target_col)
 
     print(f"最终使用的特征数量: {len(final_features)}")
@@ -681,13 +732,14 @@ def load_training_data():
     
     # 保存更新后的特征信息和scaler/数据
     updated_feature_info = {
-        'features': final_features,
+        'features': final_features, # 确保这里使用的是筛选后的 final_features
         'target': target_col,
         'sequence_length': sequence_length,
-        'binance_features_added': binance_api_features # 记录添加的币安特征
+        'binance_features_added': [f for f in binance_api_features if f in final_features] # 只记录实际使用的币安特征
     }
     with open(feature_info_file, 'w') as f:
         json.dump(updated_feature_info, f, indent=4)
+    print(f"特征信息已更新并保存到 {feature_info_file}")
     
     print("保存预处理数据缓存...")
     np.savez(cache_file, 
@@ -2592,28 +2644,49 @@ def main():
     model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
-    # 初始化损失函数 - 大幅提高方向权重
-    print("提高 FocalMSELoss 的方向权重...")
-    # criterion = nn.MSELoss().to(device) # 注释掉 MSELoss
-    criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.8).to(device) # 大幅提高方向权重至 0.8
+    # 更新输入大小
+    input_size = X_train.shape[-1] # 使用筛选后特征的数量
+    print(f"更新后的输入特征数: {input_size}") 
 
-    # 调整优化器和学习率调度器
+    # 可以考虑稍微降低模型复杂度，因为特征减少了
+    if torch.cuda.is_available():
+        # ... (保留GPU检测逻辑) ...
+        if model_type == "advanced_transformer":
+            print("特征筛选后，略微调整模型参数...")
+            model = AdvancedLSTMTransformerModel(
+                input_size=input_size,
+                seq_len=seq_len,
+                hidden_size=200,  # 可以比之前 256 略小
+                num_lstm_layers=2, 
+                num_transformer_layers=2, 
+                nhead=8, 
+                dropout=0.25 
+            ).to(device)
+            model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"调整后模型参数量: {model_parameters/1000000:.2f}M")
+        # ... (其他模型类型类似调整) ...
+
+    # 损失函数：可以先从方向权重较低开始
+    print("使用 FocalMSELoss，方向权重适中...")
+    criterion = FocalMSELoss(gamma=1.5, alpha=0.5, direction_weight=0.5).to(device) # gamma降低, 方向权重0.5
+
+    # 优化器和调度器
     optimizer = optim.AdamW(
         model.parameters(), 
-        lr=1e-4,  # 稍微提高初始学习率
-        weight_decay=1e-5, 
+        lr=8e-5,  # 可以尝试比 1e-4 略低
+        weight_decay=5e-6, # 进一步降低正则化
         betas=(0.9, 0.999),
         eps=1e-8
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, 
-        T_0=15,  # 增加重启周期
-        T_mult=2, 
-        eta_min=1e-7 # 降低最小学习率
+        T_0=20,  # 重启周期可以长一些
+        T_mult=1, # 不增加周期
+        eta_min=5e-7
     )
 
     # 确认训练参数
-    print(f"损失函数: {type(criterion).__name__}, alpha: {getattr(criterion, 'alpha', 'N/A')}, direction_weight: {getattr(criterion, 'direction_weight', 'N/A')}")
+    print(f"损失函数: {type(criterion).__name__}, gamma: {getattr(criterion, 'gamma', 'N/A')}, direction_weight: {getattr(criterion, 'direction_weight', 'N/A')}")
     print(f"优化器: AdamW, 初始学习率: {optimizer.param_groups[0]['lr']:.1e}, 权重衰减: {optimizer.param_groups[0]['weight_decay']:.1e}")
     print(f"学习率调度器: CosineAnnealingWarmRestarts, T_0: {scheduler.T_0}, T_mult: {scheduler.T_mult}, eta_min: {scheduler.eta_min:.1e}")
 
@@ -2628,9 +2701,8 @@ def main():
         scheduler=scheduler,
         device=device,
         epochs=100,
-        patience=25,  # 增加耐心值以学习方向
-        model_save_path='models',
-        l2_weight=1e-5
+        patience=20, # 耐心值可以先设为 20
+        l2_weight=5e-6 # 与优化器一致
     )
 
     # 测试模型
