@@ -327,11 +327,11 @@ class FocalMSELoss(nn.Module):
     """
     结合了方向预测的MSE损失，专注于难例并重点关注方向预测
     """
-    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.8):
+    def __init__(self, gamma=2.0, alpha=0.5, direction_weight=0.9):
         super(FocalMSELoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
-        self.direction_weight = direction_weight  # 增加方向权重到0.8
+        self.direction_weight = direction_weight  # 增加方向权重到0.9
     
     def forward(self, pred, target):
         # 计算MSE
@@ -344,15 +344,39 @@ class FocalMSELoss(nn.Module):
         # 获取连续预测序列的方向 - 考虑使用变化
         # 如果batch中有多个序列，需要reshape
         if len(pred.shape) > 2:
-            pred = pred.reshape(-1, pred.shape[-1])
-            target = target.reshape(-1, target.shape[-1])
+            batch_size, seq_len, _ = pred.shape
+            pred_reshaped = pred.reshape(batch_size * seq_len, -1)
+            target_reshaped = target.reshape(batch_size * seq_len, -1)
             
-        # 计算方向是否正确
+            # 重新排列以保留序列内部的连续性
+            if batch_size > 1 and seq_len > 1:
+                # 按序列排列，而不是按批次
+                pred_continuous = pred_reshaped.reshape(batch_size, seq_len, -1)
+                target_continuous = target_reshaped.reshape(batch_size, seq_len, -1)
+                
+                # 计算每个序列内的方向变化
+                direction_losses = []
+                for i in range(batch_size):
+                    seq_pred = pred_continuous[i]
+                    seq_target = target_continuous[i]
+                    
+                    pred_diff = seq_pred[1:] - seq_pred[:-1]
+                    target_diff = seq_target[1:] - seq_target[:-1]
+                    
+                    # 计算方向匹配度
+                    sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
+                    seq_direction_loss = torch.mean(1.0 - sign_match)
+                    direction_losses.append(seq_direction_loss)
+                
+                direction_loss = torch.mean(torch.stack(direction_losses))
+                return torch.mean(focal_mse) * (1.0 - self.direction_weight) + direction_loss * self.direction_weight
+        
+        # 标准处理（没有明确的序列维度）
         if pred.shape[0] > 1:  # 确保有足够的样本计算方向
             pred_diff = pred[1:] - pred[:-1]
             target_diff = target[1:] - target[:-1]
             
-            # 计算方向匹配度 (-1到1的值，接近1表示方向完全一致)
+            # 计算方向匹配度
             sign_match = torch.sign(pred_diff) * torch.sign(target_diff)
             direction_loss = torch.mean(1.0 - sign_match)
             
@@ -1142,13 +1166,30 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         all_val_targets = np.concatenate(all_val_targets, axis=0)
         
         if len(all_val_preds) > 1:
-            val_direction_true = np.diff(all_val_targets.flatten())
-            val_direction_pred = np.diff(all_val_preds.flatten())
-            avg_val_dir_acc = np.mean((np.sign(val_direction_true) == np.sign(val_direction_pred))) * 100
+            # 优化方向准确率计算
+            pred_shapes = all_val_preds.shape
+            
+            # 检查数据维度
+            if len(pred_shapes) >= 2:
+                # 将所有数据平铺成一维数组进行连续方向计算
+                val_direction_true = np.sign(np.diff(all_val_targets.reshape(-1)))
+                val_direction_pred = np.sign(np.diff(all_val_preds.reshape(-1)))
+                
+                # 计算符号匹配的百分比
+                matches = (val_direction_true == val_direction_pred)
+                non_zero_indices = (val_direction_true != 0) & (val_direction_pred != 0)
+                
+                if np.sum(non_zero_indices) > 0:
+                    # 只考虑非零方向变化
+                    avg_val_dir_acc = np.mean(matches[non_zero_indices]) * 100
+                else:
+                    avg_val_dir_acc = 50.0  # 如果没有明确的方向变化，假设为随机水平
+            else:
+                avg_val_dir_acc = 50.0
         else:
-            avg_val_dir_acc = 0.0 # 或其他默认值
-        
-        val_dir_accs.append(avg_val_dir_acc / 100) # 记录为 0-1 的比例值
+            avg_val_dir_acc = 50.0  # 样本不足，无法计算方向
+            
+        val_dir_accs.append(avg_val_dir_acc / 100)  # 记录为 0-1 的比例值
         
         # 学习率调度器步进 - 修复缩进
         current_lr = optimizer.param_groups[0]['lr']
@@ -2704,7 +2745,7 @@ def main():
         criterion = FocalMSELoss(
             gamma=2.0, 
             alpha=0.5, 
-            direction_weight=0.8  # 显著提高方向权重
+            direction_weight=0.9  # 增加方向权重到0.9
         ).to(device)
     
     # 创建优化器
