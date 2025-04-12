@@ -61,8 +61,8 @@ Thumbs.db
 
 # Data files (通常很大，不适合直接上传)
 data/
+!data/model_ready/
 # data/processed/*.csv
-# data/model_ready/*.joblib # 取消注释如果你不想上传scaler
 
 # Model artifacts (通常很大，且是运行生成的)
 models/

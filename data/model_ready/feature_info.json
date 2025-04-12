@@ -1,1 +1,1 @@
-{"features": ["high", "close_time", "volatility", "cum_volume_12h", "close"], "target": "close", "sequence_length": 24, "prediction_horizon": 1}
+{"features": ["macd_line", "macd_signal", "macd_hist", "rsi_14", "volatility_20", "volatility_60", "funding_rate", "funding_rate_change", "taker_buy_sell_ratio", "volume", "volume_ma20", "bb_bandwidth", "adx", "sentiment_vol_x_volatility", "atr_14", "close"], "target": "close", "sequence_length": 24, "prediction_horizon": 1}
