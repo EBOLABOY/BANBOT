@@ -1356,14 +1356,21 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
         y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
     
-    # 移除裁剪步骤，因为 RobustScaler 对异常值不敏感
-    # y_pred_clipped = np.clip(y_pred_scaled, 0.001, 0.999)
+    # !!! 新增：在逆缩放前裁剪 y_pred_scaled !!!
+    # 计算缩放后 y_test 的 1% 和 99% 分位数作为裁剪边界
+    q_low = np.percentile(y_test, 1)
+    q_high = np.percentile(y_test, 99)
+    # 增加一些边界余量
+    clip_low = q_low - (q_high - q_low) * 0.5 
+    clip_high = q_high + (q_high - q_low) * 0.5
+    print(f"对缩放后的预测值进行裁剪，范围: [{clip_low:.4f}, {clip_high:.4f}]")
+    y_pred_scaled_clipped = np.clip(y_pred_scaled, clip_low, clip_high)
     
     # 逆缩放预测值和真实值 - !!! 使用 RobustScaler !!!
     print("执行逆缩放...")
     try:
-        # 使用 RobustScaler 进行逆缩放
-        y_pred = target_scaler.inverse_transform(y_pred_scaled)
+        # !!! 使用裁剪后的值进行逆缩放 !!!
+        y_pred = target_scaler.inverse_transform(y_pred_scaled_clipped)
         y_test_original = target_scaler.inverse_transform(y_test)
         
         # 额外安全检查 - 处理可能的无穷值或NaN (保留)
@@ -1383,8 +1390,8 @@ def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx
         # 获取均值和标准差作为备用缩放方法
         mean_price = np.mean(original_df['close'])
         std_price = np.std(original_df['close'])
-        # 简单线性变换作为备用
-        y_pred = y_pred_scaled * (std_price * 4) + mean_price
+        # 简单线性变换作为备用 - !!! 使用裁剪后的值 !!!
+        y_pred = y_pred_scaled_clipped * (std_price * 4) + mean_price 
         y_test_original = y_test * (std_price * 4) + mean_price
     
     # 计算评估指标 (使用逆缩放后的原始尺度值)
@@ -1664,7 +1671,8 @@ def backtest_strategy(signals_df, initial_capital=10000.0, commission_rate=0.001
         
         # 计算信号可信度 - 基于预测变化与阈值的比例
         pred_change_pct = abs(row['predicted_change_pct'])
-        dynamic_threshold = row['dynamic_threshold']
+        # !!! 使用正确的列名 dynamic_threshold_pct !!!
+        dynamic_threshold = row['dynamic_threshold_pct'] 
         confidence = min(1.0, pred_change_pct / (dynamic_threshold * 2)) if dynamic_threshold > 0 else 0.5
         
         # 执行交易
