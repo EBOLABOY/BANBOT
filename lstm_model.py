@@ -2733,67 +2733,28 @@ def main():
         persistent_workers=True
     )
     
-    # 初始化模型
-    model_type = "transformer"  # 模型类型: lstm, transformer, hybrid
-    hidden_size = 512  # 隐藏层大小
-    
-    # 基于硬件和数据大小选择模型
-    if torch.cuda.is_available():
-        mem_gb = torch.cuda.get_device_properties(0).total_memory/1e9
-        
-        if mem_gb > 11 and X_train_aug.shape[0] > 100000:
-            print(f"高端GPU检测到 ({mem_gb:.1f}GB)，使用高性能Transformer模型")
-            model = AdvancedLSTMTransformerModel(
-                input_size=X_train.shape[2], 
-                seq_len=X_train.shape[1],
-                hidden_size=512, 
-                num_lstm_layers=4, 
-                num_transformer_layers=4,
-                nhead=16,
-                dropout=0.5
-            ).to(device)
-            model_type = 'advanced_transformer'
-        elif mem_gb > 8:
-            print(f"中端GPU检测到 ({mem_gb:.1f}GB)，使用标准Transformer模型")
-            model = EnhancedLSTMTransformerModel(
-                input_size=X_train.shape[2], 
-                hidden_size=256, 
-                num_layers=3, 
-                dropout=0.3,
-                nhead=8, 
-                transformer_layers=2
-            ).to(device)
-            model_type = 'transformer'
-        else:
-            print(f"基础GPU/CPU检测到 ({mem_gb:.1f}GB)，使用LSTM模型")
-            model = EnhancedLSTMModel(input_size=X_train.shape[2]).to(device)
-            model_type = 'lstm'
-    else:
-        print("未检测到GPU，使用轻量级LSTM模型")
-        model = EnhancedLSTMModel(
-            input_size=input_size,
-            hidden_size=256,
-            num_layers=2,
-            dropout=0.3
-        ).to(device)
-        model_type = "lightweight_lstm"
+    # 初始化模型 - 强制使用简化的 EnhancedLSTMModel
+    model_type = "lstm"  # 强制指定模型类型
+    print("强制使用模型类型: lstm")
+    model = EnhancedLSTMModel(
+        input_size=input_size,
+        hidden_size=256,  # 使用简化后的参数
+        num_layers=2,
+        dropout=0.3
+    ).to(device)
     
     # 打印模型信息
     print(f"使用模型类型: {model_type}")
     model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
-    # 创建损失函数
-    if model_type == 'advanced_transformer':
-        # 使用DirectionAwareLoss - 更加关注方向预测
-        criterion = DirectionAwareLoss(alpha=0.8).to(device)
-    else:
-        # 对于其他模型，使用FocalMSELoss但更加重视方向
-        criterion = FocalMSELoss(
-            gamma=2.0, 
-            alpha=0.5, 
-            direction_weight=0.9  # 增加方向权重到0.9
-        ).to(device)
+    # 创建损失函数 - 强制使用 FocalMSELoss，因为我们现在只用LSTM
+    print("强制使用损失函数: FocalMSELoss")
+    criterion = FocalMSELoss(
+        gamma=2.0, 
+        alpha=0.5, 
+        direction_weight=0.9  # 保持高方向权重
+    ).to(device)
     
     # 创建优化器
     optimizer = torch.optim.AdamW(
