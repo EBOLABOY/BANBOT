@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import functools
 import pickle
 from tqdm import tqdm
+from sklearn.preprocessing import MinMaxScaler
 
 # 忽略特定警告
 warnings.filterwarnings("ignore", category=UserWarning, message="Given trait value dtype.*")
@@ -613,15 +614,45 @@ def load_training_data():
     scaler = RobustScaler()
     scaled_features = scaler.fit_transform(data_to_scale)
     
+    # 增强数据标准化 - 使用鲁棒缩放器
+    print("应用增强的鲁棒特征缩放...")
+    feature_scaler = RobustScaler() # 特征缩放器
+    
+    # 对每个特征单独使用鲁棒缩放
+    scaled_features_global = feature_scaler.fit_transform(data_to_scale)
+    
+    # 再对每列单独缩放以处理异常值
+    for i in range(data_to_scale.shape[1]):
+        # 捕获并处理潜在异常
+        try:
+            feature = data_to_scale[:, i].reshape(-1, 1)
+            col_scaler = RobustScaler()
+            scaled_col = col_scaler.fit_transform(feature).reshape(-1)
+            if np.any(np.isinf(scaled_col)):
+                print(f"警告: 特征 {i} 缩放后出现无穷值，使用全局缩放结果")
+                scaled_features[:, i] = scaled_features_global[:, i]
+            else:
+                scaled_features[:, i] = scaled_col
+        except Exception as e:
+            print(f"警告: 特征 {i} 缩放失败: {e}，使用全局缩放结果")
+            scaled_features[:, i] = scaled_features_global[:, i]
+    
+    scaled_features = np.nan_to_num(scaled_features, nan=0.0, posinf=3.0, neginf=-3.0)
+    print("增强特征缩放完成")
+
+    # !!! 新增：缩放目标变量 Y !!!
+    print("应用目标变量缩放 (MinMaxScaler)...")
+    target_scaler = MinMaxScaler(feature_range=(0, 1)) # 目标缩放器
+    scaled_target = target_scaler.fit_transform(target_data)
+    print("目标变量缩放完成")
+
     # 创建序列数据
     X, y = [], []
     # 确保索引不越界
     for i in range(len(scaled_features) - sequence_length):
         X.append(scaled_features[i:(i + sequence_length), :])
-        # 目标是预测下一个时间步的价格，对应scaled_features中第i+sequence_length行的目标值
-        # 注意：目标值y不需要被标准化，或者需要在预测后逆标准化
-        # 这里我们假设y是原始价格或已经处理过的目标值
-        y.append(target_data[i + sequence_length]) 
+        # 使用缩放后的目标值
+        y.append(scaled_target[i + sequence_length]) 
     
     X = np.array(X)
     y = np.array(y) # 形状已经是 (n_samples, 1)
@@ -670,7 +701,12 @@ def load_training_data():
     # 加载保存的原始DataFrame以供后续使用
     original_df_loaded = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
     
-    return (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler, original_df_loaded
+    # !!! 保存目标缩放器 !!!
+    target_scaler_file = 'data/target_scaler_v2.pkl'
+    joblib.dump(target_scaler, target_scaler_file)
+    print(f"目标缩放器已保存到 {target_scaler_file}")
+    
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test), feature_scaler, target_scaler, original_df_loaded
 
 # 添加技术分析指标计算函数
 def calculate_atr(df, period=14):
@@ -1145,50 +1181,63 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     return model, train_losses, val_losses, val_dir_accs
 
 # 测试模型
-def test_model(model, X_test, y_test, original_df, test_start_idx, device='cpu'):
+def test_model(model, X_test, y_test, target_scaler, original_df, test_start_idx, device='cpu'): # 添加 target_scaler 参数
     model.eval()
     X_test_tensor = torch.FloatTensor(X_test).to(device)
     
-    # 使用混合精度进行预测 - 统一使用 torch.amp API
+    # 使用混合精度进行预测
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu'):
-        y_pred = model(X_test_tensor).cpu().numpy()
+        y_pred_scaled = model(X_test_tensor).cpu().numpy() # 获取缩放后的预测值
     
-    # 计算评估指标
-    metrics = calculate_metrics(y_test, y_pred)
+    # !!! 新增：逆缩放预测值和真实值 !!!
+    print("执行逆缩放...")
+    try:
+        y_pred = target_scaler.inverse_transform(y_pred_scaled) # 逆缩放预测值
+        y_test_original = target_scaler.inverse_transform(y_test) # 逆缩放测试集真实值
+        print("逆缩放完成")
+    except Exception as e:
+        print(f"错误：逆缩放失败 - {e}")
+        print("请确保 target_scaler 已正确加载并传递。")
+        # 使用缩放后的值进行评估（不推荐，但作为后备）
+        y_pred = y_pred_scaled
+        y_test_original = y_test
+
+    # 计算评估指标 (使用逆缩放后的原始尺度值)
+    metrics = calculate_metrics(y_test_original, y_pred)
     
-    print("\n模型评估指标:")
+    print("\n模型评估指标 (原始价格尺度):")
     for key, value in metrics.items():
         print(f"{key.upper()}: {value:.6f}")
     
     # 获取测试集对应的时间戳
-    test_timestamps = original_df['timestamp'].iloc[test_start_idx:test_start_idx+len(y_test)].values
+    test_timestamps = original_df['timestamp'].iloc[test_start_idx:test_start_idx+len(y_test_original)].values
     
-    # 生成预测与实际值对比图
+    # 生成预测与实际值对比图 (使用原始价格)
     plt.figure(figsize=(15, 15))
     
     # 价格对比图
     plt.subplot(3, 1, 1)
-    plt.plot(test_timestamps, y_test, label='Actual Price', color='blue')
+    plt.plot(test_timestamps, y_test_original, label='Actual Price', color='blue')
     plt.plot(test_timestamps, y_pred, label='Predicted Price', color='red', linestyle='--')
     plt.xlabel('Time')
     plt.ylabel('Price')
-    plt.title('Bitcoin Price Prediction Comparison')
+    plt.title('Bitcoin Price Prediction Comparison (Original Scale)')
     plt.legend()
     plt.grid(True)
     
     # 预测误差图
     plt.subplot(3, 1, 2)
-    plt.plot(test_timestamps, y_test - y_pred, label='Prediction Error', color='green') # Added label
+    plt.plot(test_timestamps, y_test_original - y_pred, label='Prediction Error', color='green')
     plt.axhline(y=0, color='r', linestyle='-')
     plt.xlabel('Time')
     plt.ylabel('Prediction Error')
-    plt.title('Prediction Error Distribution')
-    plt.legend() # Added legend
+    plt.title('Prediction Error Distribution (Original Scale)')
+    plt.legend()
     plt.grid(True)
     
-    # 方向准确性图
+    # 方向准确性图 (使用原始价格计算方向)
     plt.subplot(3, 1, 3)
-    direction_true = np.diff(y_test.flatten())
+    direction_true = np.diff(y_test_original.flatten())
     direction_pred = np.diff(y_pred.flatten())
     
     correct_dir = (np.sign(direction_true) == np.sign(direction_pred))
@@ -1217,22 +1266,22 @@ def test_model(model, X_test, y_test, original_df, test_start_idx, device='cpu')
     plt.savefig('models/price_prediction_comparison.png')
     plt.close()
     
-    # 计算滚动预测性能
+    # 计算滚动预测性能 (使用原始价格)
     window_sizes = [7, 14, 30]
     rolling_metrics = {}
     
     for window in window_sizes:
-        if len(y_test) > window:
+        if len(y_test_original) > window:
             rolling_metrics[f'{window}day'] = []
             
-            for i in range(len(y_test) - window + 1):
-                window_true = y_test[i:i+window]
+            for i in range(len(y_test_original) - window + 1):
+                window_true = y_test_original[i:i+window]
                 window_pred = y_pred[i:i+window]
                 
                 # 计算窗口内的方向准确率
                 window_dir_true = np.diff(window_true.flatten())
                 window_dir_pred = np.diff(window_pred.flatten())
-                window_dir_acc = np.mean((window_dir_true > 0) == (window_dir_pred > 0)) * 100
+                window_dir_acc = np.mean((np.sign(window_dir_true) == np.sign(window_dir_pred))) * 100 if len(window_dir_true)>0 else 0
                 
                 rolling_metrics[f'{window}day'].append({
                     'start_idx': i,
@@ -2431,7 +2480,7 @@ def main():
     check_environment()
     
     # 加载数据
-    train_data, val_data, test_data, scaler, original_df = load_training_data()
+    train_data, val_data, test_data, feature_scaler, target_scaler, original_df = load_training_data()
     
     # 设置超参数
     input_size = train_data[0].shape[-1]
@@ -2539,28 +2588,28 @@ def main():
     print(f"模型参数量: {model_parameters/1000000:.2f}M")
     
     # 初始化损失函数
-    criterion = FocalMSELoss(gamma=2.0, alpha=0.7, direction_weight=0.7).to(device) # Increased direction_weight to 0.7
+    print("使用简单的 MSELoss 进行初始训练...")
+    criterion = nn.MSELoss().to(device) # 暂时切换到MSELoss
+    # criterion = FocalMSELoss(gamma=2.0, alpha=0.5, direction_weight=0.3).to(device)
     
     # 初始化优化器 - 增加权重衰减
     optimizer = optim.AdamW(
         model.parameters(), 
-        lr=lr, 
-        weight_decay=1e-4,  # 从1e-5增加到1e-4，增强正则化
+        lr=5e-5,  # 确认使用降低后的学习率
+        weight_decay=1e-5,  # 确认使用轻微正则化
         betas=(0.9, 0.999),
         eps=1e-8
     )
-    
-    # 初始化学习率调度器 - 使用OneCycleLR替代CosineAnnealingWarmRestarts
-    total_steps = len(train_loader) * 100  # 100轮训练
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=0.001,  # Lowered max_lr from 0.004 to 0.001
-        total_steps=total_steps,
-        pct_start=0.4,  # Increased pct_start from 0.3 to 0.4
-        div_factor=10,  # 初始学习率 = max_lr / div_factor
-        final_div_factor=1000,  # 最终学习率 = max_lr / (div_factor * final_div_factor)
-        anneal_strategy='cos'  # 使用余弦退火策略
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, 
+        T_0=10,  # 确认使用每10轮重启
+        T_mult=2,  # 确认使用周期翻倍
+        eta_min=1e-6  # 确认使用最小学习率
     )
+    
+    # 确认训练参数
+    print(f"优化器: AdamW, 初始学习率: {optimizer.param_groups[0]['lr']:.1e}, 权重衰减: {optimizer.param_groups[0]['weight_decay']:.1e}")
+    print(f"学习率调度器: CosineAnnealingWarmRestarts, T_0: {scheduler.T_0}, T_mult: {scheduler.T_mult}, eta_min: {scheduler.eta_min:.1e}")
     
     # 训练模型
     print("\n开始模型训练...")
@@ -2581,7 +2630,7 @@ def main():
     # 测试模型
     checkpoint = torch.load('models/best_lstm_model.pth', weights_only=False) # Explicitly set weights_only=False
     model.load_state_dict(checkpoint['model_state_dict'])
-    test_model(model, X_test, y_test, original_df, len(original_df) - len(X_test), device)
+    test_model(model, X_test, y_test, target_scaler, original_df, len(original_df) - len(X_test), device) # 传递 target_scaler
     
     # 输出性能优化总结
     print("\n==== 性能优化总结 ====")
