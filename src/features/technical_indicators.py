@@ -414,7 +414,7 @@ class TechnicalIndicators:
         
         # 计算动量平均值
         for window in [5, 10, 20]:
-            result_df[f'tsi_{window}'] = ta.momentum.tsi(result_df['close'])
+            result_df[f'tsi_{window}'] = tsi(result_df['close'], r=window, s=window//2)
         
         # 计算MACD指标
         result_df['macd'] = ta.trend.macd(result_df['close'])

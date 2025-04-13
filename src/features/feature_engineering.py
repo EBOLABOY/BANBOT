@@ -176,9 +176,9 @@ class FeatureEngineer:
         
         # 处理缺失值
         if fill_na == 'forward':
-            result_df[feature_cols] = result_df[feature_cols].fillna(method='ffill')
+            result_df[feature_cols] = result_df[feature_cols].ffill()
             # 对于开头的NaN，使用后向填充
-            result_df[feature_cols] = result_df[feature_cols].fillna(method='bfill')
+            result_df[feature_cols] = result_df[feature_cols].bfill()
         elif fill_na == 'mean':
             for col in feature_cols:
                 if result_df[col].dtype in [np.float64, np.int64]:
@@ -206,6 +206,12 @@ class FeatureEngineer:
                         z_scores = (result_df[col] - mean) / std
                         result_df[col] = result_df[col].mask(abs(z_scores) > 3, mean)
         
+        # 特征缩放前确保没有无穷值和NaN
+        result_df = result_df.replace([np.inf, -np.inf], np.nan)
+        numeric_cols = result_df.select_dtypes(include=[np.number]).columns
+        # 对于数值型特征中的NaN，用0填充
+        result_df[numeric_cols] = result_df[numeric_cols].fillna(0)
+        
         # 特征缩放
         if scaling == 'standard':
             scaler = StandardScaler()
@@ -223,10 +229,6 @@ class FeatureEngineer:
             numeric_cols = result_df[feature_cols].select_dtypes(include=[np.number]).columns
             result_df[numeric_cols] = scaler.fit_transform(result_df[numeric_cols])
             self.scalers['robust'] = scaler
-        
-        # 替换无穷值为NaN，然后用0填充
-        result_df = result_df.replace([np.inf, -np.inf], np.nan)
-        result_df = result_df.fillna(0)
         
         logger.info("特征预处理完成")
         return result_df
