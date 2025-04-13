@@ -66,6 +66,44 @@ features:
     - momentum         # 动量特征
     - market_microstructure  # 市场微观结构特征
 
+# 新增跨周期特征配置
+feature_engineering:
+  # 跨周期特征配置
+  cross_timeframe_features:
+    # 1小时周期特征 - 短期价格行为、波动性和交易量
+    "1h": 
+      - "vwap"              # 成交量加权平均价
+      - "volume_delta"      # 交易量变化
+      - "rsi_14"            # 相对强弱指数
+      - "macd"              # 移动平均收敛/发散
+      - "bbands_width"      # 布林带宽度
+      - "atr_14"            # 平均真实范围
+      - "price_change_20"   # 20周期价格变化
+      - "volume_price_trend" # 交易量价格趋势
+      - "obv"               # 能量潮
+    
+    # 4小时周期特征 - 中期趋势和势头
+    "4h":
+      - "sma_50"            # 50周期简单移动平均线
+      - "ema_50"            # 50周期指数移动平均线
+      - "price_rel_sma_50"  # 价格相对于SMA50的比率
+      - "price_rel_ema_50"  # 价格相对于EMA50的比率
+      - "adx_14"            # 平均方向指数
+      - "aroon_oscillator"  # Aroon震荡指标
+      - "cci_20"            # 商品通道指数
+      - "tsi"               # 真实强度指数
+    
+    # 日线周期特征 - 长期趋势和市场结构
+    "1d":
+      - "sma_200"           # 200周期简单移动平均线
+      - "ema_200"           # 200周期指数移动平均线
+      - "price_rel_sma_200" # 价格相对于SMA200的比率
+      - "ichimoku_a"        # 一目均衡图A线
+      - "ichimoku_b"        # 一目均衡图B线
+      - "mom_20"            # 20周期动量
+      - "stoch_k"           # 随机指标K值
+      - "stoch_d"           # 随机指标D值
+
 # 模型配置
 models:
   # 预测目标
