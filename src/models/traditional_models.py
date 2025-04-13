@@ -10,6 +10,7 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 from sklearn.model_selection import GridSearchCV, cross_val_score
 import xgboost as xgb
+from datetime import datetime
 
 from src.models.base_model import BaseModel
 from src.utils.logger import get_logger
@@ -40,9 +41,22 @@ class LinearModel(BaseModel):
             model_type (str): 线性模型类型，可选 'ridge' 或 'lasso'
             model_dir (str): 模型保存目录
         """
-        super().__init__(name, model_params, prediction_horizon, target_type, model_dir)
+        super().__init__(target_type=target_type, model_params=model_params, name=name)
         
+        # 保存额外的属性
+        self.prediction_horizon = prediction_horizon
+        self.model_dir = model_dir
         self.model_type = model_type
+        self.model = None
+        self.trained = False
+        self.feature_names = None
+        self.metadata = {
+            "creation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "prediction_horizon": prediction_horizon,
+            "target_type": target_type,
+            "model_subtype": model_type,
+            "metrics": {}
+        }
         
         # 设置默认参数
         default_params = {
@@ -58,7 +72,6 @@ class LinearModel(BaseModel):
             default_params.update(model_params)
         
         self.model_params = default_params
-        self.metadata["model_subtype"] = model_type
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], 
@@ -153,9 +166,22 @@ class TreeModel(BaseModel):
             model_type (str): 树模型类型，可选 'random_forest' 或 'gradient_boosting'
             model_dir (str): 模型保存目录
         """
-        super().__init__(name, model_params, prediction_horizon, target_type, model_dir)
+        super().__init__(target_type=target_type, model_params=model_params, name=name)
         
+        # 保存额外的属性
+        self.prediction_horizon = prediction_horizon
+        self.model_dir = model_dir
         self.model_type = model_type
+        self.model = None
+        self.trained = False
+        self.feature_names = None
+        self.metadata = {
+            "creation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "prediction_horizon": prediction_horizon,
+            "target_type": target_type,
+            "model_subtype": model_type,
+            "metrics": {}
+        }
         
         # 设置默认参数
         if model_type == "random_forest":
@@ -184,7 +210,6 @@ class TreeModel(BaseModel):
             default_params.update(model_params)
         
         self.model_params = default_params
-        self.metadata["model_subtype"] = model_type
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], 
@@ -304,7 +329,20 @@ class XGBoostModel(BaseModel):
             target_type (str): 目标变量类型
             model_dir (str): 模型保存目录
         """
-        super().__init__(name, model_params, prediction_horizon, target_type, model_dir)
+        super().__init__(target_type=target_type, model_params=model_params, name=name)
+        
+        # 保存额外的属性
+        self.prediction_horizon = prediction_horizon
+        self.model_dir = model_dir
+        self.model = None
+        self.trained = False
+        self.feature_names = None
+        self.metadata = {
+            "creation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "prediction_horizon": prediction_horizon,
+            "target_type": target_type,
+            "metrics": {}
+        }
         
         # 设置默认参数
         default_params = {
