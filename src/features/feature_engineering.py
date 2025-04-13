@@ -569,4 +569,30 @@ class FeatureEngineer:
                 except Exception as e:
                     logger.error(f"处理 {symbol} 的 {timeframe} 数据时出错: {e}")
         
-        return processed_data 
+        return processed_data
+        
+    def load_data(self, filepath):
+        """
+        加载数据文件
+        
+        参数:
+            filepath: 文件路径
+            
+        返回:
+            加载的DataFrame
+        """
+        try:
+            # 读取CSV文件
+            df = pd.read_csv(filepath)
+            
+            # 尝试将timestamp列转换为日期时间格式并设为索引
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df.set_index("timestamp", inplace=True)
+            
+            logger.debug(f"已加载数据文件 {filepath}，共 {len(df)} 条记录")
+            return df
+            
+        except Exception as e:
+            logger.error(f"加载数据文件 {filepath} 时出错: {e}")
+            return pd.DataFrame() 
