@@ -10,9 +10,9 @@ import traceback
 from datetime import datetime
 from tqdm import tqdm
 
-from utils.logger import setup_logging, get_logger
-from utils.config import load_config
-from features.feature_engineering import FeatureEngineer
+from src.utils.logger import setup_logging, get_logger
+from src.utils.config import load_config
+from src.features.feature_engineering import FeatureEngineer
 
 logger = get_logger(__name__)
 
