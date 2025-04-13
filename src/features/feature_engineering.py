@@ -270,6 +270,29 @@ class FeatureEngineer:
             n_features = len(numeric_cols)
             logger.warning(f"可用特征数量({len(numeric_cols)})少于所需数量({n_features})，已调整为{n_features}")
         
+        # 处理缺失值
+        if y is not None:
+            # 检查目标变量中的NaN
+            nan_count = np.isnan(y).sum()
+            if nan_count > 0:
+                logger.warning(f"目标变量中包含 {nan_count} 个NaN值，将被处理")
+                
+                # 创建包含特征和目标的DataFrame，以便同时处理NaN
+                combined_df = pd.DataFrame(X_numeric)
+                combined_df['target'] = y
+                
+                # 移除包含NaN的行
+                combined_df_clean = combined_df.dropna()
+                logger.info(f"移除含NaN的行后，剩余 {len(combined_df_clean)} 行数据，原始数据有 {len(combined_df)} 行")
+                
+                if len(combined_df_clean) == 0:
+                    logger.error("处理NaN值后无剩余数据，无法进行特征选择")
+                    return X, []
+                
+                # 分离特征和目标变量
+                X_numeric = combined_df_clean.drop('target', axis=1)
+                y = combined_df_clean['target']
+        
         # 特征选择
         selected_features = []
         importance_scores = {}
