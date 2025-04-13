@@ -383,63 +383,67 @@ def load_training_data():
     # 开启多线程数据处理
     torch.set_num_threads(os.cpu_count())
     
-    # 尝试加载预处理数据（如果存在）
-    cache_file = 'data/processed_data_cache_v2.npz'
-    scaler_file = 'data/scaler_v2.pkl' # 特征缩放器
-    target_scaler_file = 'data/target_scaler_v2.pkl' # 目标缩放器文件 - !!! 更新为 RobustScaler !!!
-    original_df_file = 'data/original_df_v2.csv'
-    feature_info_file = 'data/model_ready/feature_info.json' # 修改为使用feature_info.json
-
-    # 检查所有必需的缓存文件是否存在
-    if os.path.exists(cache_file) and os.path.exists(scaler_file) and os.path.exists(target_scaler_file) and os.path.exists(original_df_file):
-        print(f"找到预处理数据缓存，直接加载: {cache_file}, {scaler_file}, {target_scaler_file}")
-        
-        # 检查特征文件是否存在并加载
-        use_cache = True
-        custom_features = []
+    # 检查缓存文件
+    cache_file = "data/processed_data_cache_v2.npz"
+    scaler_file = "data/scaler_v2.pkl"
+    target_scaler_file = "data/target_scaler_v2.pkl"
+    original_df_file = "data/original_df_v2.csv"
+    
+    # 检查所有必要的缓存文件是否存在
+    all_cache_files_exist = (
+        os.path.exists(cache_file) and 
+        os.path.exists(scaler_file) and 
+        os.path.exists(target_scaler_file) and
+        os.path.exists(original_df_file)
+    )
+    
+    # 检查是否有自定义特征列表
+    use_custom_features = False
+    feature_info_file = 'data/model_ready/feature_info.json'
+    try:
+        if os.path.exists(feature_info_file):
+            with open(feature_info_file, 'r') as f:
+                feature_info = json.load(f)
+                if 'features' in feature_info and isinstance(feature_info['features'], list):
+                    use_custom_features = True
+                    custom_features = feature_info['features']
+                    print(f"从特征文件读取特征列表: {feature_info_file}")
+                    print(f"成功读取自定义特征列表，包含 {len(custom_features)} 个特征")
+                    print(f"使用自定义特征列表: {custom_features}")
+                    if 'feature_version' in feature_info:
+                        feature_version = feature_info['feature_version']
+                        cache_file = f"data/processed_data_cache_v{feature_version}.npz"
+                        scaler_file = f"data/scaler_v{feature_version}.pkl"
+                        target_scaler_file = f"data/target_scaler_v{feature_version}.pkl"
+                        original_df_file = f"data/original_df_v{feature_version}.csv"
+    except Exception as e:
+        print(f"检查特征文件时出错: {e}")
+    
+    print(f"找到预处理数据缓存，直接加载: {cache_file}, {scaler_file}, {target_scaler_file}")
+    
+    # 检查文件是否存在并尝试加载
+    use_cache = all_cache_files_exist
+    
+    if use_cache:
         try:
-            if os.path.exists(feature_info_file):
-                with open(feature_info_file, 'r') as f:
-                    feature_info = json.load(f)
-                    if 'features' in feature_info and isinstance(feature_info['features'], list):
-                        custom_features = feature_info['features']
-                        print(f"特征文件中包含 {len(custom_features)} 个特征")
-                        
-                        # 检查缓存的特征是否与当前指定的特征相同
-                        cache_feature_file = 'data/model_ready/cached_features.json'
-                        if os.path.exists(cache_feature_file):
-                            with open(cache_feature_file, 'r') as cf:
-                                cached_features = json.load(cf)
-                                if 'features' in cached_features and cached_features['features'] != custom_features:
-                                    print("特征列表已更改，将重新处理数据...")
-                                    use_cache = False
-                        else:
-                            print("找不到缓存特征文件，将重新处理数据...")
-                            use_cache = False
+            data = np.load(cache_file, allow_pickle=True)
+            X_train = data['X_train']
+            y_train = data['y_train']
+            X_val = data['X_val']
+            y_val = data['y_val']
+            X_test = data['X_test']
+            y_test = data['y_test']
+            feature_scaler = joblib.load(scaler_file)
+            target_scaler = joblib.load(target_scaler_file)
+            print("成功加载预处理数据缓存!")
+            original_df = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
+            return (X_train, y_train), (X_val, y_val), (X_test, y_test), feature_scaler, target_scaler, original_df
         except Exception as e:
-            print(f"检查特征文件时出错: {e}")
-            
-        if use_cache:
-            try:
-                data = np.load(cache_file, allow_pickle=True)
-                X_train = data['X_train']
-                y_train = data['y_train']
-                X_val = data['X_val']
-                y_val = data['y_val']
-                X_test = data['X_test']
-                y_test = data['y_test']
-                feature_scaler = joblib.load(scaler_file) # 加载特征缩放器
-                target_scaler = joblib.load(target_scaler_file) # 加载目标缩放器 - 改为 RobustScaler
-                print("成功加载预处理数据缓存!")
-                original_df = pd.read_csv(original_df_file, index_col=0, parse_dates=['timestamp'])
-                # !!! 确保返回6个值 !!!
-                return (X_train, y_train), (X_val, y_val), (X_test, y_test), feature_scaler, target_scaler, original_df
-            except Exception as e:
-                print(f"加载缓存文件失败: {e}，将重新处理数据")
-        else:
-            print("由于特征列表变更，跳过缓存加载，将重新处理数据")
-    else:
-        print("缓存文件不完整或不存在，将重新处理数据...") # 提示缓存不完整
+            print(f"加载缓存文件失败: {e}，将重新处理数据")
+            use_cache = False
+    
+    if not use_cache:
+        print("缓存文件不完整或不存在，将重新处理数据...")
     
     # 读取数据文件并预处理
     print("从原始数据文件处理特征...")
@@ -1065,7 +1069,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             
             # 重置批次开始时间
             batch_start = time.time()
-            
+        
         # 计算平均训练损失
         train_loss /= len(train_loader.dataset)
         train_losses.append(train_loss)
@@ -1096,7 +1100,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # 计算平均验证损失
         val_loss /= len(val_loader.dataset)
         val_losses.append(val_loss)
-        
+
         # 保存到tensorboard
         writer.add_scalar('Loss/validation', val_loss, epoch)
         
@@ -1156,11 +1160,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     val_dir_acc = 50.0
         else:
             val_dir_acc = 50.0  # 如果验证集太小，使用默认值
-        
-        val_dir_accs.append(val_dir_acc)
-        
-        # 保存到tensorboard
-        writer.add_scalar('Metrics/direction_accuracy', val_dir_acc, epoch)
         
         # 计算本轮训练的平均性能指标
         avg_batch_time = np.mean(batch_times)
@@ -2719,6 +2718,12 @@ def main():
     elif mem_gb >= 8:
         print(f"显存充足({mem_gb:.1f}GB)，启用数据增强...")
         aug_factor = min(int(mem_gb / 4), 4)  # 根据显存大小决定增强倍数
+    if disable_augmentation:
+        print("数据增强功能已禁用，使用原始数据进行训练")
+        X_train_aug, y_train_aug = X_train, y_train
+    elif mem_gb >= 8:
+        print(f"显存充足({mem_gb:.1f}GB)，启用数据增强...")
+        aug_factor = min(int(mem_gb / 4), 4)  # 根据显存大小决定增强倍数
         print(f"计划增强训练集至 {aug_factor}x 原始大小")
         X_train_aug, y_train_aug = create_augmented_dataset(X_train, y_train, num_augmentations=aug_factor)
         print(f"增强后训练集大小: {X_train_aug.shape}")
@@ -2727,11 +2732,6 @@ def main():
         X_train_aug, y_train_aug = X_train, y_train
     
     # 将数据转换为张量并创建数据加载器
-    train_tensor_x = torch.FloatTensor(X_train_aug)
-    train_tensor_y = torch.FloatTensor(y_train_aug)
-    train_dataset = TensorDataset(train_tensor_x, train_tensor_y)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-    
     val_tensor_x = torch.FloatTensor(X_val)
     val_tensor_y = torch.FloatTensor(y_val)
     val_dataset = TensorDataset(val_tensor_x, val_tensor_y)
@@ -2762,11 +2762,11 @@ def main():
         model = model_class(input_size=input_size, seq_len=seq_len).to(device)
     else:
         model = model_class(input_size=input_size).to(device)
+    if model_type.lower() == 'advanced':
+        model = model_class(input_size=input_size, seq_len=seq_len).to(device)
+    else:
+        model = model_class(input_size=input_size).to(device)
     
-    # 模型参数统计
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"模型总参数: {total_params:,} (可训练: {trainable_params:,})")
     
     # 损失函数和优化器
     criterion_options = {
@@ -2858,10 +2858,10 @@ def main():
         rolling_df.to_csv(f'models/rolling_{window_name}_metrics.csv', index=False)
         
         # 找出方向准确率最高的窗口
-        best_dir_acc_idx = rolling_df['DIRECTION_ACCURACY'].idxmax()
+        best_dir_acc_idx = rolling_df['direction_accuracy'].idxmax()
         best_dir_acc = rolling_df.loc[best_dir_acc_idx]
         
-        print(f"{window_name}窗口最佳方向准确率: {best_dir_acc['DIRECTION_ACCURACY']:.2f}%, "
+        print(f"{window_name}窗口最佳方向准确率: {best_dir_acc['direction_accuracy']:.2f}%, "
               f"时间段: {best_dir_acc['start_time']} 到 {best_dir_acc['end_time']}")
     
     # 生成交易信号
