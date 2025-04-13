@@ -125,8 +125,9 @@ class XGBoostOptimizer:
             # 预测
             y_pred = model.predict(X_val)
             
-            # 计算指标
-            rmse = mean_squared_error(y_val, y_pred, squared=False)
+            # 计算指标 - 兼容旧版 sklearn
+            mse = mean_squared_error(y_val, y_pred)
+            rmse = np.sqrt(mse)
             r2 = r2_score(y_val, y_pred)
             
             # 记录指标
