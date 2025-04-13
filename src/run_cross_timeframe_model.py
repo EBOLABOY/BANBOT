@@ -277,6 +277,17 @@ def main():
                     logger.info(f"文件包含以下列: {list(df.columns)[:5]}...")
             else:
                 logger.info(f"特征文件中发现跨周期前缀: {column_prefixes}")
+                
+            # 将特征列名转换为小写，用于不区分大小写的匹配
+            columns_lower = {col.lower(): col for col in df.columns}
+            
+            # 添加调试信息 - 这会显示每个时间框架前缀的几个列示例
+            for tf in timeframes:
+                tf_columns = [col for col in df.columns if col.startswith(f"{tf}_")]
+                if tf_columns:
+                    logger.info(f"{tf} 时间框架的列示例: {tf_columns[:5]}")
+                else:
+                    logger.warning(f"没有找到以 {tf}_ 开头的列")
         except Exception as e:
             logger.error(f"检查特征列名时出错: {str(e)}")
         
@@ -286,20 +297,76 @@ def main():
                 if tf in config["feature_engineering"]["cross_timeframe_features"]:
                     for feature in config["feature_engineering"]["cross_timeframe_features"][tf]:
                         prefixed_feature = f"{tf}_{feature}"
-                        # 验证特征存在
+                        # 尝试精确匹配
                         if prefixed_feature in df.columns:
                             selected_features.append(prefixed_feature)
+                        # 尝试不区分大小写的匹配
+                        elif prefixed_feature.lower() in columns_lower:
+                            actual_name = columns_lower[prefixed_feature.lower()]
+                            selected_features.append(actual_name)
+                            logger.info(f"通过不区分大小写匹配到特征: '{prefixed_feature}' -> '{actual_name}'")
+                        # 尝试部分匹配（查找包含该特征名称的列）
                         else:
-                            logger.warning(f"特征 '{prefixed_feature}' 不在特征文件中")
+                            potential_matches = [col for col in df.columns 
+                                             if col.lower().startswith(f"{tf.lower()}_") and 
+                                             feature.lower() in col.lower()]
+                            if potential_matches:
+                                best_match = potential_matches[0]  # 取第一个匹配
+                                selected_features.append(best_match)
+                                logger.info(f"通过部分匹配找到特征: '{prefixed_feature}' -> '{best_match}'")
+                            else:
+                                logger.warning(f"特征 '{prefixed_feature}' 不在特征文件中")
+                                
+                                # 尝试查找具有相似名称的特征
+                                similar_features = []
+                                for col in df.columns:
+                                    if col.startswith(f"{tf}_"):
+                                        similar_features.append(col)
+                                
+                                if similar_features:
+                                    # 显示一些最相似的特征名称，以帮助诊断问题
+                                    import difflib
+                                    most_similar = difflib.get_close_matches(
+                                        prefixed_feature, similar_features, n=3, cutoff=0.6
+                                    )
+                                    if most_similar:
+                                        logger.info(f"'{prefixed_feature}' 的相似特征: {most_similar}")
+                                        # 自动使用最相似的特征
+                                        selected_features.append(most_similar[0])
+                                        logger.info(f"自动使用最相似的特征: '{most_similar[0]}'")
         
         if not selected_features:
             # 如果没有配置特定特征，则使用所有带前缀的特征
             logger.warning("未找到匹配的特征，将使用所有特征")
-            selected_features = df.columns.tolist()
-            # 限制特征数量以避免命令行过长
-            if len(selected_features) > 20:
-                logger.warning(f"特征数量过多 ({len(selected_features)})，将只使用前20个")
-                selected_features = selected_features[:20]
+            
+            # 对于每个时间框架，选择一些最常用的特征
+            for tf in timeframes:
+                common_features = [
+                    f"{tf}_close", f"{tf}_vwap", f"{tf}_rsi_14", f"{tf}_macd",
+                    f"{tf}_ema_50", f"{tf}_sma_50"
+                ]
+                
+                # 检查这些常用特征是否存在
+                for feature in common_features:
+                    exact_match = feature in df.columns
+                    case_insensitive_match = feature.lower() in columns_lower
+                    
+                    if exact_match:
+                        selected_features.append(feature)
+                    elif case_insensitive_match:
+                        selected_features.append(columns_lower[feature.lower()])
+            
+            # 如果仍然没有特征，则回退到使用前5个特征
+            if not selected_features:
+                selected_features = df.columns.tolist()
+                # 限制特征数量以避免命令行过长
+                if len(selected_features) > 20:
+                    logger.warning(f"特征数量过多 ({len(selected_features)})，将只使用前20个")
+                    selected_features = selected_features[:20]
+            else:
+                logger.info(f"已选择 {len(selected_features)} 个常用特征")
+        
+        logger.info(f"最终选定的特征: {selected_features}")
         
         # 构建模型训练命令
         cmd = [

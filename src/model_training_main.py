@@ -154,13 +154,37 @@ def main():
             if missing_features:
                 logger.warning(f"以下特征在数据中不存在: {missing_features}")
                 
-                # 过滤掉不存在的特征
-                selected_features = [f for f in selected_features if f in X.columns]
-                if not selected_features:
-                    logger.error("没有有效的特征可用于训练，请检查特征名称")
-                    return 1
+                # 尝试进行模糊匹配（不区分大小写）
+                fuzzy_matched = {}
+                for missing in missing_features:
+                    possible_matches = []
+                    for col in X.columns:
+                        # 不区分大小写的比较
+                        if missing.lower() == col.lower():
+                            possible_matches.append(col)
+                    
+                    if possible_matches:
+                        fuzzy_matched[missing] = possible_matches[0]
+                        logger.info(f"模糊匹配: '{missing}' -> '{possible_matches[0]}'")
                 
-                logger.info(f"使用这些有效特征进行训练: {selected_features}")
+                # 更新选定的特征列表，用匹配到的实际列名替换不存在的列名
+                if fuzzy_matched:
+                    selected_features = [fuzzy_matched.get(f, f) for f in selected_features]
+                    logger.info(f"更新后的特征列表: {selected_features}")
+                
+                # 重新检查
+                missing_features = [f for f in selected_features if f not in X.columns]
+                
+                # 过滤掉不存在的特征
+                if missing_features:
+                    selected_features = [f for f in selected_features if f in X.columns]
+                    if not selected_features:
+                        logger.error("没有有效的特征可用于训练，请检查特征名称")
+                        logger.info(f"数据中的可用列: {list(X.columns)[:20]}")
+                        logger.info(f"请查看特征文件确认真正的列名")
+                        return 1
+                    
+                    logger.info(f"使用这些有效特征进行训练: {selected_features}")
             
             # 只保留选定的特征
             X = X[selected_features]
