@@ -27,8 +27,8 @@ import xgboost as xgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-from models.base_model import BaseModel
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -7,12 +7,12 @@ import json
 from typing import Dict, List, Union, Optional, Any
 
 # 导入各类模型
-from models.base_model import BaseModel
-from models.machine_learning_models import create_ml_model
-from models.time_series_models import create_time_series_model
-from models.deep_learning_models import create_deep_learning_model
-from models.ensemble_models import create_ensemble_model, EnsembleModel
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.models.machine_learning_models import create_ml_model
+from src.models.time_series_models import create_time_series_model
+from src.models.deep_learning_models import create_deep_learning_model
+from src.models.ensemble_models import create_ensemble_model, EnsembleModel
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

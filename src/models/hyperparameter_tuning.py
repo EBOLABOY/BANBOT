@@ -16,9 +16,9 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from skopt import BayesSearchCV
 from skopt.space import Real, Integer, Categorical
 
-from models.base_model import BaseModel
-from models.model_validation import ModelValidator, create_model_factory
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.models.model_validation import ModelValidator, create_model_factory
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

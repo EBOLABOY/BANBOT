@@ -11,8 +11,8 @@ from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifi
 from sklearn.model_selection import GridSearchCV, cross_val_score
 import xgboost as xgb
 
-from models.base_model import BaseModel
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

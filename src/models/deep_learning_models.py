@@ -23,8 +23,8 @@ try:
 except ImportError:
     TF_AVAILABLE = False
 
-from models.base_model import BaseModel
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

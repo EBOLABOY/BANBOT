@@ -15,8 +15,8 @@ from tqdm import tqdm
 # 导入模型评估相关库
 from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score, precision_score, recall_score, f1_score
 
-from models.base_model import BaseModel
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -337,7 +337,7 @@ class EnsembleModel(BaseModel):
         self.recent_errors = model_data["recent_errors"]
         
         # 加载基础模型
-        from models.model_factory import load_model
+        from src.models.model_factory import load_model
         self.models = []
         for model_path in model_data["model_paths"]:
             model = load_model(model_path)

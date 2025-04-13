@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import TimeSeriesSplit, KFold
 from tqdm import tqdm
 
-from models.base_model import BaseModel
-from models.model_evaluation import ModelEvaluator
-from utils.logger import get_logger
+from src.models.base_model import BaseModel
+from src.models.model_evaluation import ModelEvaluator
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
