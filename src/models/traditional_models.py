@@ -398,9 +398,17 @@ class XGBoostModel(BaseModel):
         
         # 创建模型
         if is_classification:
-            self.model = xgb.XGBClassifier(**self.model_params)
+            # 对于分类任务，将早停参数直接添加到模型参数中
+            self.model = xgb.XGBClassifier(
+                **self.model_params,
+                early_stopping_rounds=self.early_stopping_rounds
+            )
         else:
-            self.model = xgb.XGBRegressor(**self.model_params)
+            # 对于回归任务，将早停参数直接添加到模型参数中
+            self.model = xgb.XGBRegressor(
+                **self.model_params,
+                early_stopping_rounds=self.early_stopping_rounds
+            )
         
         # 准备训练参数
         fit_params = {}
@@ -409,15 +417,6 @@ class XGBoostModel(BaseModel):
         if validation_data is not None:
             X_val, y_val = validation_data
             fit_params["eval_set"] = [(X, y), (X_val, y_val)]
-            # 在新版XGBoost中，early_stopping_rounds已移至callbacks参数
-            # 创建早停回调
-            callbacks = [xgb.callback.EarlyStopping(
-                rounds=self.early_stopping_rounds,
-                metric_name=self.eval_metric,
-                save_best=True,
-                maximize=(self.eval_metric == 'auc')  # AUC需要最大化，其他如RMSE需要最小化
-            )]
-            fit_params["callbacks"] = callbacks
             fit_params["eval_metric"] = self.eval_metric
         
         # 训练模型
