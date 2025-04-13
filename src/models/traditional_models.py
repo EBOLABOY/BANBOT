@@ -381,6 +381,38 @@ class XGBoostModel(BaseModel):
         返回:
             Dict: 包含训练指标的字典
         """
+        # 数据有效性检查
+        if len(X) == 0 or len(y) == 0:
+            raise ValueError(f"训练数据为空: X形状={X.shape}，y长度={len(y)}")
+        
+        # 记录数据形状
+        logger.info(f"训练XGBoost模型，数据形状: X={X.shape}, y={y.shape}")
+        logger.info(f"数据示例: X前5行={X.iloc[:5, :3] if isinstance(X, pd.DataFrame) else X[:5, :3]}")
+        logger.info(f"目标示例: y前5个值={y.iloc[:5] if isinstance(y, pd.Series) else y[:5]}")
+        
+        # 检查目标变量
+        if isinstance(y, pd.Series) or isinstance(y, np.ndarray):
+            nan_count = np.isnan(y).sum()
+            inf_count = np.sum(~np.isfinite(y))
+            if nan_count > 0 or inf_count > 0:
+                logger.warning(f"目标变量中仍有无效值: NaN={nan_count}, Inf={inf_count}")
+                
+                # 再次尝试修复目标变量
+                if isinstance(y, pd.Series):
+                    y = y.copy()
+                    # 替换无穷大值为0
+                    y.replace([np.inf, -np.inf], 0, inplace=True)
+                    # 替换NaN为0
+                    y.fillna(0, inplace=True)
+                else:  # numpy array
+                    y = y.copy()
+                    # 替换无穷大值为0
+                    y[~np.isfinite(y)] = 0
+                    # 替换NaN为0
+                    y[np.isnan(y)] = 0
+                    
+                logger.info("已再次处理目标变量中的无效值")
+        
         # 保存特征名称（如果可用）
         if isinstance(X, pd.DataFrame):
             self.feature_names = X.columns.tolist()
@@ -417,37 +449,84 @@ class XGBoostModel(BaseModel):
         # 如果提供了验证数据，添加到训练参数
         if validation_data is not None:
             X_val, y_val = validation_data
-            fit_params["eval_set"] = [(X, y), (X_val, y_val)]
+            
+            # 检查验证数据
+            if len(X_val) == 0 or len(y_val) == 0:
+                logger.warning(f"验证数据为空: X_val形状={X_val.shape}，y_val长度={len(y_val)}")
+                # 不使用验证数据，避免因为空验证集导致训练失败
+                validation_data = None
+                logger.info("由于验证数据为空，将不使用验证集进行训练")
+            else:
+                # 验证集也做同样的检查和修复
+                if isinstance(y_val, pd.Series) or isinstance(y_val, np.ndarray):
+                    val_nan_count = np.isnan(y_val).sum()
+                    val_inf_count = np.sum(~np.isfinite(y_val))
+                    if val_nan_count > 0 or val_inf_count > 0:
+                        logger.warning(f"验证目标变量中有无效值: NaN={val_nan_count}, Inf={val_inf_count}")
+                        
+                        # 修复验证目标变量
+                        if isinstance(y_val, pd.Series):
+                            y_val = y_val.copy()
+                            y_val.replace([np.inf, -np.inf], 0, inplace=True)
+                            y_val.fillna(0, inplace=True)
+                        else:  # numpy array
+                            y_val = y_val.copy()
+                            y_val[~np.isfinite(y_val)] = 0
+                            y_val[np.isnan(y_val)] = 0
+                            
+                        # 更新验证数据
+                        validation_data = (X_val, y_val)
+                        logger.info("已处理验证目标变量中的无效值")
+                
+                fit_params["eval_set"] = [(X, y), (X_val, y_val)]
         
         # 训练模型
-        logger.info(f"开始训练 XGBoost {'分类' if is_classification else '回归'}模型...")
-        self.model.fit(X, y, **fit_params)
-        self.trained = True
-        
-        # 计算训练指标
-        train_metrics = {
-            "train_score": self.model.score(X, y)
-        }
-        
-        # 如果提供了验证数据，则计算验证指标
-        if validation_data is not None:
-            X_val, y_val = validation_data
-            val_metrics = self.evaluate(X_val, y_val)
-            train_metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+        try:
+            logger.info(f"开始训练 XGBoost {'分类' if is_classification else '回归'}模型...")
+            self.model.fit(X, y, **fit_params)
+            self.trained = True
             
-            # 添加最佳迭代轮数
-            if hasattr(self.model, "best_iteration"):
-                train_metrics["best_iteration"] = self.model.best_iteration
-                logger.info(f"最佳迭代轮数: {self.model.best_iteration}")
-        
-        # 更新元数据
-        self.metadata["metrics"].update(train_metrics)
-        
-        # 日志输出
-        metric_name = "准确率" if is_classification else "R²"
-        logger.info(f"XGBoost模型训练完成，训练 {metric_name}: {train_metrics['train_score']:.4f}")
-        
-        return train_metrics
+            # 计算训练指标
+            train_metrics = {
+                "train_score": self.model.score(X, y)
+            }
+            
+            # 如果提供了验证数据，则计算验证指标
+            if validation_data is not None:
+                X_val, y_val = validation_data
+                try:
+                    val_metrics = self.evaluate(X_val, y_val)
+                    train_metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                except Exception as e:
+                    logger.warning(f"计算验证指标时出错: {str(e)}")
+                
+                # 添加最佳迭代轮数
+                if hasattr(self.model, "best_iteration"):
+                    train_metrics["best_iteration"] = self.model.best_iteration
+                    logger.info(f"最佳迭代轮数: {self.model.best_iteration}")
+            
+            # 更新元数据
+            self.metadata["metrics"].update(train_metrics)
+            
+            # 日志输出
+            metric_name = "准确率" if is_classification else "R²"
+            logger.info(f"XGBoost模型训练完成，训练 {metric_name}: {train_metrics['train_score']:.4f}")
+            
+            return train_metrics
+        except Exception as e:
+            logger.error(f"XGBoost训练失败: {str(e)}")
+            # 如果是数据相关错误，提供更多详细信息
+            if "empty" in str(e).lower() or "nan" in str(e).lower() or "infinity" in str(e).lower():
+                logger.error(f"数据质量问题: X形状={X.shape}, y形状={y.shape if hasattr(y, 'shape') else len(y)}")
+                if isinstance(y, (pd.Series, np.ndarray)):
+                    logger.error(f"y值统计: 最小值={np.nanmin(y) if len(y) > 0 else 'N/A'}, "
+                                f"最大值={np.nanmax(y) if len(y) > 0 else 'N/A'}, "
+                                f"均值={np.nanmean(y) if len(y) > 0 else 'N/A'}, "
+                                f"NaN数量={np.isnan(y).sum() if len(y) > 0 else 'N/A'}")
+            
+            # 创建一个简单的假指标，允许流程继续，但标记模型为未训练
+            self.trained = False
+            return {"train_score": 0.0, "error": str(e)}
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
