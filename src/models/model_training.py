@@ -217,31 +217,61 @@ def train_model(model: BaseModel,
     """
     logger.info(f"开始训练模型: {model.name} (类型: {model.__class__.__name__})")
     
-    # 数据清洗：检查特征数据中的无效值
+    # 数据清洗：处理特征和目标数据中的无效值
     X_train_clean = X_train.copy()
     y_train_clean = y_train.copy()
     
-    # 检查并记录目标数据中的无效值
+    # 检查目标数据量
+    if len(y_train_clean) == 0:
+        raise ValueError("目标数据为空，无法训练模型")
+    
+    # 检查并处理目标数据中的无效值
     nan_mask = y_train_clean.isna()
     inf_mask = ~np.isfinite(y_train_clean)
     invalid_mask = nan_mask | inf_mask
+    invalid_count = invalid_mask.sum()
     
-    if invalid_mask.any():
-        invalid_count = invalid_mask.sum()
-        logger.warning(f"目标数据中发现 {invalid_count} 个无效值 (NaN/无穷大)，将移除这些样本")
+    if invalid_count > 0:
+        logger.warning(f"目标数据中发现 {invalid_count} 个无效值 (NaN/无穷大)，占总数的 {invalid_count/len(y_train_clean)*100:.2f}%")
         
-        # 移除目标变量中含有无效值的样本
-        valid_indices = ~invalid_mask
-        X_train_clean = X_train_clean.loc[valid_indices]
-        y_train_clean = y_train_clean.loc[valid_indices]
+        # 如果无效值超过一定比例，发出警告
+        invalid_ratio = invalid_count / len(y_train_clean)
+        if invalid_ratio > 0.5:
+            logger.warning(f"警告：目标数据中超过50%的值为无效值，可能会影响模型质量")
         
-        logger.info(f"清洗后的训练集大小: 特征={X_train_clean.shape}, 目标={y_train_clean.shape}")
+        # 计算有效值的均值和中位数，用于替换无效值
+        valid_values = y_train_clean[~invalid_mask]
+        if len(valid_values) > 0:
+            # 如果还有有效值，使用有效值的均值替换无效值
+            replacement_value = valid_values.mean()
+            logger.info(f"使用有效值的均值 {replacement_value:.6f} 替换目标中的无效值")
+            y_train_clean = y_train_clean.fillna(replacement_value)
+            # 对于无穷大值，也用均值替换
+            y_train_clean[inf_mask] = replacement_value
+        else:
+            # 如果没有有效值，使用0替换
+            logger.warning("目标数据中没有有效值，使用0替换所有无效值")
+            y_train_clean = y_train_clean.fillna(0)
+            y_train_clean[inf_mask] = 0
     
     # 检查特征数据中的无效值
     feature_nan_count = X_train_clean.isna().sum().sum()
     if feature_nan_count > 0:
-        logger.warning(f"特征数据中发现 {feature_nan_count} 个 NaN 值，将使用前向填充法处理")
+        logger.warning(f"特征数据中发现 {feature_nan_count} 个 NaN 值，将使用前向填充和后向填充法处理")
+        # 先用前向填充，再用后向填充
         X_train_clean = X_train_clean.fillna(method='ffill').fillna(method='bfill')
+        
+        # 如果还有NaN（列全为NaN的情况），用0填充
+        if X_train_clean.isna().sum().sum() > 0:
+            logger.warning("特征数据中仍有NaN值，用0填充")
+            X_train_clean = X_train_clean.fillna(0)
+    
+    # 检查无穷大值
+    inf_feature_count = (~np.isfinite(X_train_clean)).sum().sum()
+    if inf_feature_count > 0:
+        logger.warning(f"特征数据中发现 {inf_feature_count} 个无穷大值，将替换为0")
+        # 将无穷大替换为0
+        X_train_clean = X_train_clean.replace([np.inf, -np.inf], 0)
     
     # 处理验证集（如果有）
     validation_data = None
@@ -250,23 +280,42 @@ def train_model(model: BaseModel,
         y_val_clean = y_val.copy()
         
         # 检查验证目标数据中的无效值
-        val_invalid_mask = y_val_clean.isna() | ~np.isfinite(y_val_clean)
-        if val_invalid_mask.any():
-            val_invalid_count = val_invalid_mask.sum()
-            logger.warning(f"验证目标数据中发现 {val_invalid_count} 个无效值，将移除这些样本")
-            
-            # 移除验证集中无效目标值的样本
-            val_valid_indices = ~val_invalid_mask
-            X_val_clean = X_val_clean.loc[val_valid_indices]
-            y_val_clean = y_val_clean.loc[val_valid_indices]
-            
-            logger.info(f"清洗后的验证集大小: 特征={X_val_clean.shape}, 目标={y_val_clean.shape}")
+        val_nan_mask = y_val_clean.isna()
+        val_inf_mask = ~np.isfinite(y_val_clean)
+        val_invalid_mask = val_nan_mask | val_inf_mask
+        val_invalid_count = val_invalid_mask.sum()
         
-        # 处理验证特征中的缺失值
+        if val_invalid_count > 0:
+            logger.warning(f"验证目标数据中发现 {val_invalid_count} 个无效值，将替换为训练集均值")
+            
+            # 使用训练集中有效值的均值替换
+            if 'replacement_value' in locals():
+                y_val_clean = y_val_clean.fillna(replacement_value)
+                y_val_clean[val_inf_mask] = replacement_value
+            else:
+                # 如果之前没有计算替换值，使用训练集均值
+                replacement_value = y_train_clean.mean()
+                y_val_clean = y_val_clean.fillna(replacement_value)
+                y_val_clean[val_inf_mask] = replacement_value
+        
+        # 处理验证特征中的缺失值（使用与训练集相同的方法）
         if X_val_clean.isna().sum().sum() > 0:
-            X_val_clean = X_val_clean.fillna(method='ffill').fillna(method='bfill')
+            X_val_clean = X_val_clean.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        
+        # 处理验证特征中的无穷大值
+        if (~np.isfinite(X_val_clean)).sum().sum() > 0:
+            X_val_clean = X_val_clean.replace([np.inf, -np.inf], 0)
         
         validation_data = (X_val_clean, y_val_clean)
+    
+    # 最终检查确保数据有效
+    if len(X_train_clean) == 0 or len(y_train_clean) == 0:
+        raise ValueError("数据清洗后训练集为空，请检查数据质量或调整清洗参数")
+    
+    # 输出清洗后的数据统计
+    logger.info(f"数据清洗完成: 训练特征={X_train_clean.shape}, 训练目标={y_train_clean.shape}")
+    if validation_data:
+        logger.info(f"验证特征={validation_data[0].shape}, 验证目标={validation_data[1].shape}")
     
     # 训练模型
     train_metrics = model.train(X_train_clean, y_train_clean, validation_data)
