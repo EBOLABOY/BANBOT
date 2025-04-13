@@ -21,6 +21,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import xgboost as xgb
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
+from xgboost.callback import EarlyStopping
 
 
 class ModelOptimizer:
@@ -198,12 +199,20 @@ class ModelOptimizer:
         # 记录开始时间
         start_time = time.time()
         
-        # 执行搜索
+        # 创建早停回调
+        early_stopping = EarlyStopping(
+            rounds=early_stopping_rounds,
+            min_delta=0.00001,
+            save_best=True,
+            maximize=False,
+            data_name="validation",
+            metric_name="rmse"
+        )
+        
         search.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            eval_metric='rmse',
-            early_stopping_rounds=early_stopping_rounds,
+            callbacks=[early_stopping],
             verbose=False
         )
         
@@ -227,8 +236,7 @@ class ModelOptimizer:
         best_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            eval_metric='rmse',
-            early_stopping_rounds=early_stopping_rounds,
+            callbacks=[early_stopping],
             verbose=False
         )
         

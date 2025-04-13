@@ -387,11 +387,23 @@ def retrain_with_selected_features(
         
         # 训练模型
         if X_val_selected is not None and y_val is not None:
+            # 使用新的XGBoost API
+            from xgboost.callback import EarlyStopping
+            
+            # 创建早停回调
+            early_stopping = EarlyStopping(
+                rounds=early_stopping_rounds,
+                min_delta=0.00001,
+                save_best=True,
+                maximize=False,
+                data_name="validation",
+                metric_name="rmse"
+            )
+            
             model.fit(
                 X_train_selected, y_train,
                 eval_set=[(X_val_selected, y_val)],
-                eval_metric='rmse',
-                early_stopping_rounds=early_stopping_rounds,
+                callbacks=[early_stopping],
                 verbose=verbose
             )
         else:

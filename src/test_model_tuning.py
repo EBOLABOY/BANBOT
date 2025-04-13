@@ -13,6 +13,7 @@ from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
 import joblib
 from datetime import datetime
+from xgboost.callback import EarlyStopping
 
 from src.model_optimization import ModelOptimizer
 from src.feature_selector import FeatureSelector
@@ -103,12 +104,24 @@ def train_baseline_model(X_train, y_train, X_val, y_val, output_dir="data/result
         random_state=42
     )
     
+    # 训练模型 - 使用新的XGBoost API
+    # 注意：新版XGBoost不再直接支持eval_metric参数，而是使用callbacks
+    
+    # 创建早停回调
+    early_stopping = EarlyStopping(
+        rounds=10,
+        min_delta=0.00001,
+        save_best=True,
+        maximize=False,
+        data_name="validation",
+        metric_name="rmse"
+    )
+    
     # 训练模型
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        eval_metric='rmse',
-        early_stopping_rounds=10,
+        callbacks=[early_stopping],
         verbose=False
     )
     
@@ -196,6 +209,10 @@ def test_feature_selection(model_path, X_train, y_train, X_val, y_val):
     
     # 使用选定的特征重新训练模型
     from src.feature_selector import retrain_with_selected_features
+    
+    # 注意：retrain_with_selected_features函数内部也需要使用新的XGBoost API
+    # 但由于该函数在另一个文件中，我们只能在这里添加日志提示
+    logger.info("注意：如果retrain_with_selected_features函数使用旧的XGBoost API，可能会出错")
     
     new_model_path = retrain_with_selected_features(
         model_path=model_path,
