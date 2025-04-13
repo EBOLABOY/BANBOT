@@ -80,6 +80,10 @@ models:
     medium: [1440, 4320]   # 1天, 3天
     long: [10080, 20160]   # 7天, 14天
   
+  # 特征集合
+  feature_sets:
+    selected_features_1h: ["vwap", "pvt", "sma_200", "price_rel_sma_100", "price_rel_ema_100", "ema_20_50_ratio", "ichimoku_b", "price_change_50", "roc_50", "price_impact_coef_200"]
+  
   # 模型类型
   model_types:
     - lstm
