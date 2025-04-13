@@ -243,11 +243,14 @@ class XGBoostOptimizer:
         train_metrics = model.train(X_train, y_train, validation_data=(X_val, y_val))
         
         # 评估模型
-        train_score = model.score(X_train, y_train)
-        test_score = model.score(X_test, y_test)
+        train_metrics = model.evaluate(X_train, y_train)
+        test_metrics = model.evaluate(X_test, y_test)
         
-        logger.info(f"训练集 R²: {train_score:.4f}")
-        logger.info(f"测试集 R²: {test_score:.4f}")
+        train_r2 = train_metrics.get('r2', 0.0)
+        test_r2 = test_metrics.get('r2', 0.0)
+        
+        logger.info(f"训练集 R²: {train_r2:.4f}")
+        logger.info(f"测试集 R²: {test_r2:.4f}")
         
         return model
 
