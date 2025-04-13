@@ -1,8 +1,8 @@
 """
-特征选择器模块
+Feature Selector Module
 
-提供基于模型特征重要性和SHAP值的特征选择功能，
-帮助识别最重要的特征，减少过拟合并提高模型性能。
+Provides feature selection capabilities based on model importance and SHAP values,
+helping identify the most important features, reduce overfitting and improve model performance.
 """
 
 import os
@@ -18,7 +18,7 @@ import shap
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-# 设置日志
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -28,7 +28,7 @@ logger = logging.getLogger('FeatureSelector')
 
 class FeatureSelector:
     """
-    特征选择器类，用于从预训练模型中选择最重要的特征
+    Feature selector class for selecting important features from a pre-trained model
     """
     
     def __init__(
@@ -40,14 +40,14 @@ class FeatureSelector:
         verbose: bool = False
     ):
         """
-        初始化特征选择器
+        Initialize feature selector
         
         Args:
-            model_path: 预训练模型的路径
-            method: 特征选择方法，'importance'（基于模型特征重要性）或'shap'（基于SHAP值）
-            n_features: 要选择的特征数量
-            output_dir: 输出目录
-            verbose: 是否打印详细日志
+            model_path: Path to pre-trained model
+            method: Feature selection method, 'importance' or 'shap'
+            n_features: Number of features to select
+            output_dir: Output directory
+            verbose: Whether to print detailed logs
         """
         self.model_path = model_path
         self.method = method
@@ -55,35 +55,35 @@ class FeatureSelector:
         self.output_dir = output_dir
         self.verbose = verbose
         
-        # 创建输出目录
+        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
-        # 加载模型
+        # Load model
         self.model = self._load_model()
         
-        # 检测模型类型
+        # Detect model type
         self.model_type = self._detect_model_type()
         
-        # 存储选择的特征
+        # Store selected features
         self.selected_features = None
         self.feature_importances = None
     
     def _load_model(self) -> Any:
         """
-        加载预训练模型
+        Load pre-trained model
         
         Returns:
-            训练好的模型
+            Trained model
         """
-        logger.info(f"从 {self.model_path} 加载模型")
+        logger.info(f"Loading model from {self.model_path}")
         return joblib.load(self.model_path)
     
     def _detect_model_type(self) -> str:
         """
-        检测模型类型
+        Detect model type
         
         Returns:
-            str: 模型类型，例如'xgboost', 'lightgbm', 'sklearn'等
+            str: Model type, e.g. 'xgboost', 'lightgbm', 'sklearn'
         """
         model_str = str(type(self.model))
         if 'xgboost' in model_str.lower():
@@ -101,202 +101,203 @@ class FeatureSelector:
         y: Optional[pd.Series] = None
     ) -> List[str]:
         """
-        选择特征
+        Select features
         
         Args:
-            X: 特征DataFrame
-            y: 目标变量（用于SHAP值计算）
+            X: Feature DataFrame
+            y: Target variable (for SHAP value calculation)
             
         Returns:
-            List[str]: 选择的特征列表
+            List[str]: List of selected features
         """
         if self.method == 'importance':
             selected_features = self._select_by_importance(X)
         elif self.method == 'shap':
             if y is None:
-                logger.warning("使用SHAP方法进行特征选择需要提供目标变量y，将退回到使用特征重要性")
+                logger.warning("Target variable y required for SHAP method, falling back to importance method")
                 selected_features = self._select_by_importance(X)
             else:
                 selected_features = self._select_by_shap(X, y)
         else:
-            raise ValueError(f"不支持的特征选择方法: {self.method}")
+            raise ValueError(f"Unsupported feature selection method: {self.method}")
         
         self.selected_features = selected_features
         return selected_features
     
     def _select_by_importance(self, X: pd.DataFrame) -> List[str]:
         """
-        基于模型特征重要性选择特征
+        Select features based on model feature importance
         
         Args:
-            X: 特征DataFrame
+            X: Feature DataFrame
             
         Returns:
-            List[str]: 选择的特征列表
+            List[str]: List of selected features
         """
-        logger.info("基于模型特征重要性选择特征")
+        logger.info("Selecting features based on model importance")
         
-        # 检查模型是否有特征重要性属性
+        # Check if model has feature_importances_
         if not hasattr(self.model, 'feature_importances_'):
-            raise ValueError("模型没有feature_importances_属性，无法使用importance方法进行特征选择")
+            raise ValueError("Model does not have feature_importances_ attribute")
         
-        # 获取特征重要性
+        # Get feature importance
         importances = self.model.feature_importances_
         
-        # 创建特征重要性DataFrame
+        # Create feature importance DataFrame
         feature_names = X.columns.tolist()
         importance_df = pd.DataFrame({
             'feature': feature_names,
             'importance': importances
         })
         
-        # 按重要性排序
+        # Sort by importance
         importance_df = importance_df.sort_values('importance', ascending=False)
         
-        # 保存特征重要性结果
+        # Save feature importance result
         self.feature_importances = importance_df
         
-        # 选择前N个特征
+        # Select top N features
         selected_features = importance_df.head(self.n_features)['feature'].tolist()
         
-        logger.info(f"选择了 {len(selected_features)} 个特征")
+        logger.info(f"Selected {len(selected_features)} features")
         if self.verbose:
             for i, feat in enumerate(selected_features[:10]):
                 importance = importance_df[importance_df['feature'] == feat]['importance'].values[0]
                 logger.info(f"  {i+1}. {feat}: {importance:.6f}")
             if len(selected_features) > 10:
-                logger.info(f"  ... 以及 {len(selected_features) - 10} 个其他特征")
+                logger.info(f"  ... and {len(selected_features) - 10} more features")
         
         return selected_features
     
     def _select_by_shap(self, X: pd.DataFrame, y: pd.Series) -> List[str]:
         """
-        基于SHAP值选择特征
+        Select features based on SHAP values
         
         Args:
-            X: 特征DataFrame
-            y: 目标变量
+            X: Feature DataFrame
+            y: Target variable
             
         Returns:
-            List[str]: 选择的特征列表
+            List[str]: List of selected features
         """
-        logger.info("基于SHAP值选择特征")
+        logger.info("Selecting features based on SHAP values")
         
-        # 计算SHAP值
-        # 对于大型数据集，使用随机采样减少计算量
+        # Calculate SHAP values
+        # For large datasets, use random sampling to reduce computation time
         if len(X) > 1000:
-            logger.info(f"数据集较大，随机采样 1000 条记录计算SHAP值")
+            logger.info(f"Dataset is large, randomly sampling 1000 records for SHAP calculation")
             sample_indices = np.random.choice(len(X), 1000, replace=False)
             X_sample = X.iloc[sample_indices]
         else:
             X_sample = X
         
-        # 根据模型类型选择SHAP解释器
+        # Choose SHAP explainer based on model type
         if self.model_type == 'xgboost':
             explainer = shap.Explainer(self.model)
             shap_values = explainer(X_sample)
             shap_values_mean = np.abs(shap_values.values).mean(0)
         else:
-            # 对于其他模型，使用TreeExplainer
+            # For other models, use TreeExplainer
             try:
                 explainer = shap.TreeExplainer(self.model)
                 shap_values = explainer.shap_values(X_sample)
-                if isinstance(shap_values, list):  # 对于多输出模型
+                if isinstance(shap_values, list):  # For multi-output models
                     shap_values_mean = np.abs(shap_values[0]).mean(0)
                 else:
                     shap_values_mean = np.abs(shap_values).mean(0)
             except Exception as e:
-                logger.warning(f"计算SHAP值失败: {e}，退回到使用特征重要性")
+                logger.warning(f"SHAP value calculation failed: {e}, falling back to importance method")
                 return self._select_by_importance(X)
         
-        # 创建SHAP值DataFrame
+        # Create SHAP value DataFrame
         feature_names = X.columns.tolist()
         shap_df = pd.DataFrame({
             'feature': feature_names,
             'importance': shap_values_mean
         })
         
-        # 按重要性排序
+        # Sort by importance
         shap_df = shap_df.sort_values('importance', ascending=False)
         
-        # 保存特征重要性结果
+        # Save feature importance result
         self.feature_importances = shap_df
         
-        # 选择前N个特征
+        # Select top N features
         selected_features = shap_df.head(self.n_features)['feature'].tolist()
         
-        logger.info(f"选择了 {len(selected_features)} 个特征")
+        logger.info(f"Selected {len(selected_features)} features")
         if self.verbose:
             for i, feat in enumerate(selected_features[:10]):
                 importance = shap_df[shap_df['feature'] == feat]['importance'].values[0]
                 logger.info(f"  {i+1}. {feat}: {importance:.6f}")
             if len(selected_features) > 10:
-                logger.info(f"  ... 以及 {len(selected_features) - 10} 个其他特征")
+                logger.info(f"  ... and {len(selected_features) - 10} more features")
         
         return selected_features
     
     def plot_feature_importance(
-        self, 
+        self,
         save_path: Optional[str] = None,
         top_n: int = 20,
         figsize: Tuple[int, int] = (10, 8)
     ) -> None:
         """
-        绘制特征重要性图表
-        
+        Plot feature importance chart
+
         Args:
-            save_path: 保存路径，如果为None则不保存
-            top_n: 显示前N个特征
-            figsize: 图表大小
+            save_path: Path to save the plot, if None, the plot is not saved
+            top_n: Number of top features to display
+            figsize: Figure size
         """
         if self.feature_importances is None:
-            logger.warning("尚未计算特征重要性，无法绘制图表")
+            logger.warning("Feature importance not calculated yet, cannot plot.")
             return
-        
-        # 获取前N个特征
+
+        # Get top N features
         if top_n is not None and top_n < len(self.feature_importances):
             plot_df = self.feature_importances.head(top_n)
         else:
             plot_df = self.feature_importances
-        
-        # 创建图表
+
+        # Create figure
         plt.figure(figsize=figsize)
-        
-        # 绘制条形图
+
+        # Plot bar chart
         plt.barh(
-            plot_df['feature'][::-1],  # 反转顺序，使最重要的特征显示在顶部
+            plot_df['feature'][::-1],  # Reverse order to show most important at top
             plot_df['importance'][::-1]
         )
-        
-        # 添加标题和标签
-        method_name = "特征重要性" if self.method == 'importance' else "SHAP值"
-        plt.title(f"前 {len(plot_df)} 个重要特征 (基于{method_name})")
-        plt.xlabel('重要性')
-        plt.ylabel('特征名')
+
+        # Add title and labels
+        method_name = "Importance" if self.method == 'importance' else "SHAP Value"
+        plt.title(f"Top {len(plot_df)} Features (Method: {method_name})")
+        plt.xlabel('Importance Score')
+        plt.ylabel('Feature Name')
         plt.tight_layout()
-        
-        # 保存图表
+
+        # Save figure
         if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure directory exists
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"特征重要性图表已保存至: {save_path}")
-        
+            logger.info(f"Feature importance plot saved to: {save_path}")
+
         plt.close()
     
     def save_selected_features(self, save_path: Optional[str] = None) -> str:
         """
-        保存选择的特征到JSON文件
+        Save selected features to a JSON file
         
         Args:
-            save_path: 保存路径，如果为None则使用默认路径
+            save_path: Path to save, if None, use default path
             
         Returns:
-            str: 保存的文件路径
+            str: Path to saved file
         """
         if self.selected_features is None:
-            logger.warning("尚未选择特征，无法保存")
+            logger.warning("No features selected yet, cannot save")
             return ""
         
-        # 使用默认路径
+        # Use default path
         if save_path is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             save_path = os.path.join(
@@ -304,7 +305,7 @@ class FeatureSelector:
                 f"selected_features_{self.method}_{self.n_features}_{timestamp}.json"
             )
         
-        # 创建保存数据
+        # Create save data
         data = {
             'model_path': self.model_path,
             'model_type': self.model_type,
@@ -314,19 +315,19 @@ class FeatureSelector:
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         
-        # 如果有特征重要性，也保存
+        # If feature importance is available, also save it
         if self.feature_importances is not None:
-            # 转换为字典格式保存
+            # Convert to dictionary format
             importance_dict = {}
             for _, row in self.feature_importances.iterrows():
                 importance_dict[row['feature']] = float(row['importance'])
             data['feature_importances'] = importance_dict
         
-        # 保存到文件
+        # Save to file
         with open(save_path, 'w') as f:
             json.dump(data, f, indent=4)
         
-        logger.info(f"已选择的特征保存至: {save_path}")
+        logger.info(f"Selected features saved to: {save_path}")
         
         return save_path
 
