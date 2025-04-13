@@ -395,6 +395,7 @@ class XGBoostModel(BaseModel):
         
         # 更新模型参数
         self.model_params["objective"] = objective
+        self.model_params["eval_metric"] = self.eval_metric
         
         # 创建模型
         if is_classification:
@@ -417,7 +418,6 @@ class XGBoostModel(BaseModel):
         if validation_data is not None:
             X_val, y_val = validation_data
             fit_params["eval_set"] = [(X, y), (X_val, y_val)]
-            fit_params["eval_metric"] = self.eval_metric
         
         # 训练模型
         logger.info(f"开始训练 XGBoost {'分类' if is_classification else '回归'}模型...")
