@@ -157,12 +157,13 @@ class ModelOptimizer:
         if param_grid is None:
             param_grid = self.get_xgboost_param_grid(is_random=(self.search_method == 'random'))
         
-        # 设置基本参数
+        # 设置基本参数，将early_stopping_rounds移到这里
         base_params = {
             'objective': 'reg:squarederror',
             'n_estimators': n_estimators,
             'random_state': self.random_state,
-            'tree_method': 'hist'  # 使用直方图方法加速训练
+            'tree_method': 'hist',  # 使用直方图方法加速训练
+            'early_stopping_rounds': early_stopping_rounds # 添加早停参数
         }
         
         # 合并固定参数
@@ -199,11 +200,10 @@ class ModelOptimizer:
         # 记录开始时间
         start_time = time.time()
         
+        # fit方法不再需要early_stopping_rounds和eval_metric
         search.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=early_stopping_rounds,
-            eval_metric="rmse",
             verbose=False
         )
         
@@ -221,14 +221,13 @@ class ModelOptimizer:
         self.logger.info(f"最佳参数: {self.best_params}")
         self.logger.info(f"最佳分数 ({self.scoring}): {self.best_score:.6f}")
         
-        # 使用最佳参数重新训练模型
+        # 使用最佳参数重新训练模型，构造函数已包含early_stopping_rounds
         best_model = XGBRegressor(**{**base_params, **self.best_params})
         
+        # fit方法不再需要early_stopping_rounds和eval_metric
         best_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=early_stopping_rounds,
-            eval_metric="rmse",
             verbose=False
         )
         

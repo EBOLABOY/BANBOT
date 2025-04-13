@@ -93,7 +93,7 @@ def train_baseline_model(X_train, y_train, X_val, y_val, output_dir="data/result
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
     
-    # 创建基准模型
+    # 创建基准模型，将early_stopping_rounds移到这里
     model = XGBRegressor(
         objective='reg:squarederror',
         n_estimators=100,
@@ -101,15 +101,14 @@ def train_baseline_model(X_train, y_train, X_val, y_val, output_dir="data/result
         learning_rate=0.1,
         subsample=0.8,
         colsample_bytree=0.8,
-        random_state=42
+        random_state=42,
+        early_stopping_rounds=10  # 早停参数在此处设置
     )
     
-    # 训练模型 - 使用直接参数而不是回调
+    # 训练模型 - fit方法只接收eval_set
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        early_stopping_rounds=10,
-        eval_metric="rmse",
         verbose=False
     )
     

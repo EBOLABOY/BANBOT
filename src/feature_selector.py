@@ -378,21 +378,19 @@ def retrain_with_selected_features(
             if key in params:
                 del params[key]
         
-        # 创建新模型
+        # 创建新模型，将early_stopping_rounds移到这里
+        params['early_stopping_rounds'] = early_stopping_rounds # 添加早停参数
         model = XGBRegressor(**params)
         
         # 筛选特征
         X_train_selected = X_train[selected_features]
         X_val_selected = X_val[selected_features] if X_val is not None else None
         
-        # 训练模型
+        # 训练模型 - fit方法只接收eval_set
         if X_val_selected is not None and y_val is not None:
-            # 使用直接参数而不是回调
             model.fit(
                 X_train_selected, y_train,
                 eval_set=[(X_val_selected, y_val)],
-                early_stopping_rounds=early_stopping_rounds,
-                eval_metric="rmse",
                 verbose=verbose
             )
         else:
