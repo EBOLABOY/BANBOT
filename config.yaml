@@ -121,6 +121,83 @@ models:
   # 特征集合
   feature_sets:
     selected_features_1h: ["vwap", "pvt", "sma_200", "price_rel_sma_100", "price_rel_ema_100", "ema_20_50_ratio", "ichimoku_b", "price_change_50", "roc_50", "price_impact_coef_200"]
+    
+    # 基于Ichimoku云图的特征集 - 侧重于趋势判断和价格关系
+    ichimoku_based_set: [
+      "ichimoku_b", 
+      "ichimoku_base", 
+      "ichimoku_a", 
+      "ichimoku_conv", 
+      "price_rel_sma_50", 
+      "price_rel_ema_50", 
+      "close", 
+      "high", 
+      "low",
+      "adx_14"
+    ]
+    
+    # 价格动量特征集 - 侧重于价格动量和趋势变化
+    price_momentum_set: [
+      "ema_10",
+      "ema_20", 
+      "sma_5", 
+      "sma_20",
+      "ema_20_50_ratio", 
+      "sma_20_50_ratio",
+      "macd", 
+      "macd_signal", 
+      "rsi_14", 
+      "roc_10",
+      "price_change_20",
+      "momentum_10"
+    ]
+    
+    # A型特征集 - 波动率和价格范围指标
+    volatility_set: [
+      "atr_14", 
+      "true_range", 
+      "bbands_width_20", 
+      "keltner_width", 
+      "high_low_diff", 
+      "returns_volatility_20", 
+      "garman_klass_vol", 
+      "price_volatility",
+      "close",
+      "cci_14"
+    ]
+    
+    # 交易量特征集 - 侧重于交易量和价格关系指标
+    volume_based_set: [
+      "volume", 
+      "vwap", 
+      "volume_change_pct", 
+      "rel_volume_20", 
+      "pvt", 
+      "price_volume_corr_20", 
+      "volume_oscillator", 
+      "mfi_14",
+      "obv",
+      "price_impact_coef_200"
+    ]
+    
+    # 综合特征集 - 结合重要特征和互补指标
+    comprehensive_set: [
+      "ichimoku_b",          # 趋势
+      "ichimoku_base",       # 趋势
+      "ema_10",              # 动量
+      "rsi_14",              # 动量
+      "atr_14",              # 波动率
+      "bbands_width_20",     # 波动率
+      "volume",              # 交易量
+      "vwap",                # 交易量/价格
+      "macd",                # 趋势/动量
+      "price_rel_sma_50",    # 趋势强度
+      "price_change_20",     # 价格行为
+      "high_low_diff",       # 价格范围
+      "close",               # 价格基准
+      "adx_14",              # 趋势强度
+      "mfi_14"               # 资金流向
+    ]
   
   # 模型类型
   model_types:
