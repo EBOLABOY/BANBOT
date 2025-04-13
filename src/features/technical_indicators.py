@@ -18,6 +18,27 @@ class TechnicalIndicators:
     """
     
     @staticmethod
+    def tsi(close, r=25, s=13):
+        """
+        计算趋势强度指数 (TSI)
+        
+        参数:
+            close: 收盘价数据
+            r: 长周期
+            s: 短周期
+            
+        返回:
+            TSI值
+        """
+        m = close.diff()
+        m1 = m.ewm(span=r, adjust=False).mean()
+        m2 = m1.ewm(span=s, adjust=False).mean()
+        a = m.abs()
+        a1 = a.ewm(span=r, adjust=False).mean()
+        a2 = a1.ewm(span=s, adjust=False).mean()
+        return 100 * m2 / a2
+    
+    @staticmethod
     def calculate_indicators(df, indicators=None, window_sizes=None):
         """
         计算技术指标
@@ -339,17 +360,7 @@ class TechnicalIndicators:
             result_df[f'adx_neg_{window}'] = ta.trend.adx_neg(result_df['high'], result_df['low'], result_df['close'], window=window)
         
         # 计算趋势强度指数 (TSI)
-        # TA-Lib没有TSI，所以我们实现一个简单版本
-        def tsi(close, r=25, s=13):
-            m = close.diff()
-            m1 = m.ewm(span=r, adjust=False).mean()
-            m2 = m1.ewm(span=s, adjust=False).mean()
-            a = m.abs()
-            a1 = a.ewm(span=r, adjust=False).mean()
-            a2 = a1.ewm(span=s, adjust=False).mean()
-            return 100 * m2 / a2
-            
-        result_df['tsi'] = tsi(result_df['close'])
+        result_df['tsi'] = TechnicalIndicators.tsi(result_df['close'])
         
         # 计算Ichimoku云指标
         result_df['ichimoku_a'] = ta.trend.ichimoku_a(result_df['high'], result_df['low'])
@@ -414,7 +425,7 @@ class TechnicalIndicators:
         
         # 计算动量平均值
         for window in [5, 10, 20]:
-            result_df[f'tsi_{window}'] = tsi(result_df['close'], r=window, s=window//2)
+            result_df[f'tsi_{window}'] = TechnicalIndicators.tsi(result_df['close'], r=window, s=window//2)
         
         # 计算MACD指标
         result_df['macd'] = ta.trend.macd(result_df['close'])
