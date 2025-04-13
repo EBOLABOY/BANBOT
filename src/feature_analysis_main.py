@@ -15,6 +15,7 @@ from sklearn.feature_selection import mutual_info_regression
 from sklearn.preprocessing import StandardScaler
 import joblib
 import yaml
+from datetime import datetime
 
 # 导入项目内部模块
 from src.utils.logger import setup_logging, get_logger
@@ -48,7 +49,7 @@ class FeatureAnalyzer:
         
         logger.info("特征分析器已初始化")
     
-    def load_features(self, symbol, timeframe, start_date=None, end_date=None):
+    def load_data(self, symbol, timeframe, start_date=None, end_date=None):
         """
         加载特征数据
         
@@ -125,7 +126,7 @@ class FeatureAnalyzer:
         logger.info(f"已加载 {symbol} 的 {timeframe} 数据，共 {len(features_df)} 条记录，{len(features_df.columns)} 个特征和 {len(targets_df.columns)} 个目标变量")
         return features_df, targets_df
     
-    def calculate_feature_importance(self, features_df, targets_df, target_col='price_change_1h', 
+    def calculate_feature_importance(self, features_df, targets_df, target_col='target_pct_60', 
                                     method='random_forest', n_estimators=100, top_n=30):
         """
         计算特征重要性
@@ -139,7 +140,7 @@ class FeatureAnalyzer:
             top_n: 返回最重要的前N个特征
             
         返回:
-            特征重要性DataFrame
+            特征重要性DataFrame，如果计算失败则返回None
         """
         if features_df is None or targets_df is None:
             logger.error("特征数据或目标变量为空，无法计算特征重要性")
@@ -148,59 +149,75 @@ class FeatureAnalyzer:
         # 确保目标变量在目标数据中
         if target_col not in targets_df.columns:
             logger.error(f"目标变量 {target_col} 不在目标数据中")
+            # 列出可用的目标变量
+            available_targets = targets_df.columns.tolist()
+            if available_targets:
+                logger.info(f"可用的目标变量有: {', '.join(available_targets[:10])}" + 
+                           (f" 等共{len(available_targets)}个" if len(available_targets) > 10 else ""))
             return None
         
-        # 准备数据
-        X = features_df.copy()
-        y = targets_df[target_col].copy()
-        
-        # 删除缺失值
-        valid_indices = ~np.isnan(y)
-        X = X[valid_indices]
-        y = y[valid_indices]
-        
-        # 列名记录
-        feature_names = X.columns.tolist()
-        
-        # 标准化特征
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        importance_scores = {}
-        
-        if method == 'random_forest':
-            # 使用随机森林计算特征重要性
-            model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
-            model.fit(X_scaled, y)
+        try:
+            # 准备数据
+            X = features_df.copy()
+            y = targets_df[target_col].copy()
             
-            # 获取特征重要性
-            importances = model.feature_importances_
-            importance_df = pd.DataFrame({
-                'feature': feature_names,
-                'importance': importances
-            })
+            # 删除缺失值
+            valid_indices = ~np.isnan(y)
+            X = X[valid_indices]
+            y = y[valid_indices]
             
-        elif method == 'mutual_info':
-            # 使用互信息计算特征重要性
-            importances = mutual_info_regression(X_scaled, y)
-            importance_df = pd.DataFrame({
-                'feature': feature_names,
-                'importance': importances
-            })
-        
-        else:
-            logger.error(f"不支持的特征重要性计算方法: {method}")
+            if len(y) == 0:
+                logger.error(f"目标变量 {target_col} 全为NaN值，无法计算特征重要性")
+                return None
+                
+            # 列名记录
+            feature_names = X.columns.tolist()
+            
+            # 标准化特征
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            
+            importance_scores = {}
+            
+            if method == 'random_forest':
+                # 使用随机森林计算特征重要性
+                logger.info(f"使用随机森林方法计算特征重要性，目标变量: {target_col}")
+                model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
+                model.fit(X_scaled, y)
+                
+                # 获取特征重要性
+                importances = model.feature_importances_
+                importance_df = pd.DataFrame({
+                    'feature': feature_names,
+                    'importance': importances
+                })
+                
+            elif method == 'mutual_info':
+                # 使用互信息计算特征重要性
+                logger.info(f"使用互信息方法计算特征重要性，目标变量: {target_col}")
+                importances = mutual_info_regression(X_scaled, y)
+                importance_df = pd.DataFrame({
+                    'feature': feature_names,
+                    'importance': importances
+                })
+            
+            else:
+                logger.error(f"不支持的特征重要性计算方法: {method}")
+                return None
+            
+            # 按重要性排序
+            importance_df = importance_df.sort_values('importance', ascending=False)
+            
+            # 仅保留前N个特征
+            if top_n and len(importance_df) > top_n:
+                importance_df = importance_df.head(top_n)
+            
+            logger.info(f"已计算 {method} 方法下的特征重要性，最重要的特征是 {importance_df['feature'].iloc[0]}")
+            return importance_df
+            
+        except Exception as e:
+            logger.exception(f"计算特征重要性时发生错误: {str(e)}")
             return None
-        
-        # 按重要性排序
-        importance_df = importance_df.sort_values('importance', ascending=False)
-        
-        # 仅保留前N个特征
-        if top_n and len(importance_df) > top_n:
-            importance_df = importance_df.head(top_n)
-        
-        logger.info(f"已计算 {method} 方法下的特征重要性，最重要的特征是 {importance_df['feature'].iloc[0]}")
-        return importance_df
     
     def calculate_feature_correlation(self, features_df, method='pearson', threshold=0.7):
         """
@@ -416,16 +433,16 @@ class FeatureAnalyzer:
         
         plt.close()
     
-    def run_analysis(self, symbol, timeframe, target_col='price_change_1h', start_date=None, end_date=None,
-                    importance_method='random_forest', corr_method='pearson', top_n=30, 
-                    corr_threshold=0.7, max_features=50):
+    def run_analysis(self, symbol, timeframe, target_col='target_pct_60', 
+                    start_date=None, end_date=None, importance_method='random_forest', 
+                    corr_method='pearson', top_n=30, corr_threshold=0.7, max_features=50):
         """
-        运行完整的特征分析流程
+        运行特征分析
         
         参数:
-            symbol: 交易对名称
+            symbol: 交易对
             timeframe: 时间周期
-            target_col: 目标变量列名
+            target_col: 目标变量
             start_date: 开始日期
             end_date: 结束日期
             importance_method: 特征重要性计算方法
@@ -433,97 +450,133 @@ class FeatureAnalyzer:
             top_n: 展示前N个特征
             corr_threshold: 相关性阈值
             max_features: 最大特征数量
-            
-        返回:
-            分析结果字典
         """
-        # 创建结果子目录
-        result_subdir = os.path.join(self.results_dir, f"feature_analysis_{symbol}_{timeframe}")
-        os.makedirs(result_subdir, exist_ok=True)
+        logger.info(f"开始分析 {symbol} 的 {timeframe} 数据，目标变量: {target_col}")
         
-        # 加载特征数据
-        features_df, targets_df = self.load_features(symbol, timeframe, start_date, end_date)
-        
+        # 加载特征和目标数据
+        features_df, targets_df = self.load_data(symbol, timeframe, start_date, end_date)
         if features_df is None or targets_df is None:
-            logger.error(f"无法加载 {symbol} 的 {timeframe} 特征数据")
-            return None
+            logger.error(f"无法加载 {symbol} 的 {timeframe} 数据")
+            return
         
-        # 1. 计算特征重要性
+        logger.info(f"已加载 {symbol} 的 {timeframe} 数据，共 {len(features_df)} 条记录，"
+                   f"{features_df.shape[1]} 个特征和 {targets_df.shape[1]} 个目标变量")
+        
+        # 如果指定的目标变量不存在，尝试找一个替代的目标变量
+        if target_col not in targets_df.columns:
+            logger.warning(f"指定的目标变量 {target_col} 不存在，尝试查找合适的替代变量")
+            
+            # 优先考虑target_pct开头的变量
+            target_pct_cols = [col for col in targets_df.columns if 'target_pct_' in col]
+            if target_pct_cols:
+                target_col = target_pct_cols[0]
+                logger.info(f"已选择 {target_col} 作为替代目标变量")
+            # 其次考虑target_direction开头的变量    
+            elif any(col.startswith('target_direction_') for col in targets_df.columns):
+                target_col = next(col for col in targets_df.columns if col.startswith('target_direction_'))
+                logger.info(f"已选择 {target_col} 作为替代目标变量")
+            # 然后考虑price_change开头的变量
+            elif any(col.startswith('price_change_') for col in targets_df.columns):
+                target_col = next(col for col in targets_df.columns if col.startswith('price_change_'))
+                logger.info(f"已选择 {target_col} 作为替代目标变量")
+            # 最后，使用任何可用的目标变量
+            elif len(targets_df.columns) > 0:
+                target_col = targets_df.columns[0]
+                logger.info(f"已选择 {target_col} 作为替代目标变量")
+            else:
+                logger.error("无法找到合适的目标变量，分析终止")
+                return
+        
+        # 数据统计分析
+        stats_df = self.analyze_feature_distributions(features_df, top_n=top_n)
+        
+        # 特征重要性分析
         importance_df = self.calculate_feature_importance(
-            features_df, targets_df, target_col, method=importance_method, top_n=None
-        )
+            features_df, targets_df, target_col, method=importance_method, top_n=top_n)
         
-        # 2. 计算特征相关性
+        # 如果特征重要性计算失败，可能是目标变量不存在，尝试其他可用的目标变量
+        if importance_df is None and targets_df is not None and not targets_df.empty:
+            logger.warning(f"使用目标变量 {target_col} 计算特征重要性失败，尝试使用其他可用目标变量")
+            # 查找所有可用的目标变量
+            available_targets = targets_df.columns.tolist()
+            for alt_target in available_targets:
+                logger.info(f"尝试使用替代目标变量: {alt_target}")
+                importance_df = self.calculate_feature_importance(
+                    features_df, targets_df, alt_target, method=importance_method, top_n=top_n)
+                if importance_df is not None:
+                    target_col = alt_target
+                    logger.info(f"成功使用替代目标变量 {target_col} 计算特征重要性")
+                    break
+        
+        # 特征相关性分析
         corr_matrix, high_corr_df = self.calculate_feature_correlation(
-            features_df, method=corr_method, threshold=corr_threshold
-        )
+            features_df, method=corr_method, threshold=corr_threshold)
         
-        # 3. 分析特征分布
-        stats_df = self.analyze_feature_distributions(features_df)
+        # 目标相关性分析
+        target_corr_df = None
+        if importance_df is not None:
+            # 获取最重要的特征
+            top_features = importance_df['feature'].head(10).tolist()
+            
+            # 计算这些特征与目标的相关性
+            target_corr_df = pd.DataFrame()
+            if top_features:
+                # 计算相关性
+                corr_data = []  # 存储相关性数据的列表
+                for feature in top_features:
+                    if feature in features_df.columns:
+                        corr = features_df[feature].corr(targets_df[target_col])
+                        corr_data.append({
+                            'feature': feature,
+                            'correlation': corr
+                        })
+                
+                # 创建DataFrame
+                if corr_data:
+                    target_corr_df = pd.DataFrame(corr_data)
+                
+                # 按相关性排序
+                if not target_corr_df.empty:
+                    target_corr_df = target_corr_df.sort_values('correlation', ascending=False)
         
-        # 4. 选择最佳特征
-        selected_features = self.select_best_features(
-            importance_df, corr_matrix, max_features=max_features, corr_threshold=corr_threshold
-        )
+        # 创建一个结果目录
+        result_dir = os.path.join(self.results_dir, f"feature_analysis_{symbol}_{timeframe}")
+        os.makedirs(result_dir, exist_ok=True)
         
-        # 5. 可视化特征重要性
-        importance_path = os.path.join(result_subdir, f"feature_importance_{symbol}_{timeframe}.png")
-        self.visualize_feature_importance(importance_df, importance_path, top_n=top_n)
+        # 可视化
+        if importance_df is not None:
+            # 保存特征重要性数据到CSV
+            importance_csv = os.path.join(result_dir, f"feature_importance_{symbol}_{timeframe}.csv")
+            importance_df.to_csv(importance_csv)
+            logger.info(f"特征重要性数据已保存至 {importance_csv}")
+            
+            # 可视化特征重要性
+            importance_path = os.path.join(result_dir, f"feature_importance_{symbol}_{timeframe}.png")
+            self.visualize_feature_importance(importance_df, importance_path, top_n=top_n)
+        else:
+            logger.warning("特征重要性数据为空，跳过特征重要性图表生成")
         
-        # 6. 可视化相关性矩阵
-        corr_path = os.path.join(result_subdir, f"correlation_matrix_{symbol}_{timeframe}.png")
-        self.visualize_correlation_matrix(corr_matrix, corr_path, top_n=top_n)
+        if corr_matrix is not None:
+            # 可视化相关性矩阵
+            corr_path = os.path.join(result_dir, f"correlation_matrix_{symbol}_{timeframe}.png")
+            self.visualize_correlation_matrix(corr_matrix, corr_path, top_n=top_n)
+        else:
+            logger.warning("相关性矩阵为空，跳过相关性图表生成")
         
-        # 保存分析结果
-        # 特征重要性
-        importance_csv = os.path.join(result_subdir, f"feature_importance_{symbol}_{timeframe}.csv")
-        importance_df.to_csv(importance_csv)
+        # 保存统计数据到CSV
+        if stats_df is not None:
+            stats_csv = os.path.join(result_dir, f"feature_stats_{symbol}_{timeframe}.csv")
+            stats_df.to_csv(stats_csv)
+            logger.info(f"特征统计数据已保存至 {stats_csv}")
         
-        # 高相关性特征对
-        high_corr_csv = os.path.join(result_subdir, f"high_correlation_{symbol}_{timeframe}.csv")
-        high_corr_df.to_csv(high_corr_csv)
+        # 保存高相关性对到CSV
+        if high_corr_df is not None and not high_corr_df.empty:
+            high_corr_csv = os.path.join(result_dir, f"high_correlation_pairs_{symbol}_{timeframe}.csv")
+            high_corr_df.to_csv(high_corr_csv)
+            logger.info(f"高相关性对数据已保存至 {high_corr_csv}")
         
-        # 特征统计信息
-        stats_csv = os.path.join(result_subdir, f"feature_stats_{symbol}_{timeframe}.csv")
-        stats_df.to_csv(stats_csv)
-        
-        # 选择的最佳特征
-        selected_csv = os.path.join(result_subdir, f"selected_features_{symbol}_{timeframe}.csv")
-        pd.DataFrame({'feature': selected_features}).to_csv(selected_csv, index=False)
-        
-        # 保存为joblib文件，方便后续使用
-        selected_features_file = os.path.join(result_subdir, f"selected_features_{symbol}_{timeframe}.joblib")
-        joblib.dump(selected_features, selected_features_file)
-        
-        # 创建分析报告
-        report = {
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'target_column': target_col,
-            'feature_count': len(features_df.columns),
-            'selected_feature_count': len(selected_features),
-            'top_features': importance_df['feature'].head(10).tolist(),
-            'high_correlation_count': len(high_corr_df),
-            'missing_data_avg': stats_df['missing_percent'].mean(),
-            'results_directory': result_subdir,
-            'files': {
-                'importance_csv': importance_csv,
-                'high_corr_csv': high_corr_csv,
-                'stats_csv': stats_csv,
-                'selected_csv': selected_csv,
-                'importance_plot': importance_path,
-                'correlation_plot': corr_path,
-                'selected_features_joblib': selected_features_file
-            }
-        }
-        
-        # 保存报告为YAML
-        report_path = os.path.join(result_subdir, f"analysis_report_{symbol}_{timeframe}.yaml")
-        with open(report_path, 'w') as f:
-            yaml.dump(report, f, default_flow_style=False)
-        
-        logger.info(f"{symbol} {timeframe} 的特征分析已完成，结果保存在 {result_subdir}")
-        return report
+        logger.info(f"{symbol} {timeframe} 的特征分析已完成")
+        return result_dir
 
 def parse_args():
     """
@@ -540,7 +593,7 @@ def parse_args():
     parser.add_argument('--timeframe', type=str, default='1h',
                         help='时间周期')
     
-    parser.add_argument('--target', type=str, default='price_change_1h',
+    parser.add_argument('--target', type=str, default='target_pct_60',
                         help='目标变量列名')
     
     parser.add_argument('--start-date', type=str, default=None,
@@ -608,30 +661,31 @@ def main():
             for timeframe in timeframes:
                 logger.info(f"分析 {symbol} 的 {timeframe} 数据")
                 
-                # 运行分析
-                report = analyzer.run_analysis(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    target_col=args.target,
-                    start_date=args.start_date,
-                    end_date=args.end_date,
-                    importance_method=args.importance_method,
-                    corr_method=args.corr_method,
-                    top_n=args.top_n,
-                    corr_threshold=args.corr_threshold,
-                    max_features=args.max_features
-                )
-                
-                if report:
-                    logger.info(f"{symbol} {timeframe} 分析完成，选择了 {report['selected_feature_count']} 个特征")
-                else:
-                    logger.error(f"{symbol} {timeframe} 分析失败")
+                try:
+                    # 运行分析
+                    result_dir = analyzer.run_analysis(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        target_col=args.target,
+                        start_date=args.start_date,
+                        end_date=args.end_date,
+                        importance_method=args.importance_method,
+                        corr_method=args.corr_method,
+                        top_n=args.top_n,
+                        corr_threshold=args.corr_threshold,
+                        max_features=args.max_features
+                    )
+                except Exception as e:
+                    logger.error(f"分析 {symbol} {timeframe} 时出错: {str(e)}")
+                    logger.debug("详细错误信息:", exc_info=True)
+                    continue
         
         logger.info("特征分析流程完成")
         return 0
     
     except Exception as e:
-        logger.exception(f"特征分析过程中发生错误: {str(e)}")
+        logger.error(f"特征分析过程中发生错误: {str(e)}")
+        logger.debug("详细错误信息:", exc_info=True)
         return 1
 
 if __name__ == "__main__":
