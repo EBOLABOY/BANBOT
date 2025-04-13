@@ -225,8 +225,19 @@ class TechnicalIndicators:
         # 负量指标
         result_df['nvi'] = ta.volume.negative_volume_index(result_df['close'], result_df['volume'])
         
-        # 价格-交易量趋势
-        result_df['pvt'] = ta.volume.price_volume_trend(result_df['close'], result_df['volume'])
+        # 价格-交易量趋势 (PVT) - 自定义实现，因为ta库中没有
+        # PVT计算公式: PVT = [((CurrentClose - PreviousClose) / PreviousClose) × Volume] + PreviousPVT
+        close_pct_change = result_df['close'].pct_change()
+        pvt = pd.Series(index=result_df.index, dtype='float64')
+        pvt.iloc[0] = 0  # 初始值
+        
+        for i in range(1, len(result_df)):
+            if pd.notna(close_pct_change.iloc[i]):
+                pvt.iloc[i] = close_pct_change.iloc[i] * result_df['volume'].iloc[i] + pvt.iloc[i-1]
+            else:
+                pvt.iloc[i] = pvt.iloc[i-1]
+        
+        result_df['pvt'] = pvt
         
         logger.info("已计算交易量特征")
         return result_df
