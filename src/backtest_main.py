@@ -33,6 +33,7 @@ class Backtest:
                  initial_capital: float = 10000,
                  trading_fee: float = 0.001,
                  slippage: float = 0.0005,
+                 leverage: float = 3.0,  # 添加杠杆参数
                  output_dir: str = "results/backtest"):
         """
         初始化回测
@@ -45,6 +46,7 @@ class Backtest:
             initial_capital: 初始资金
             trading_fee: 交易费用（占交易金额的比例）
             slippage: 滑点（占价格的比例）
+            leverage: 杠杆倍数
             output_dir: 输出目录
         """
         self.model_path = model_path
@@ -54,6 +56,7 @@ class Backtest:
         self.initial_capital = initial_capital
         self.trading_fee = trading_fee
         self.slippage = slippage
+        self.leverage = leverage  # 保存杠杆倍数
         self.output_dir = output_dir
         
         # 创建输出目录
@@ -73,7 +76,8 @@ class Backtest:
         self.results = {
             'timestamp': [],
             'price': [],
-            'position': [],
+            'position': [],  # 现在可能有正值(多头)或负值(空头)
+            'position_type': [],  # 新增：记录头寸类型 ('long', 'short', 'none')
             'cash': [],
             'holdings': [],
             'total_value': [],
@@ -201,7 +205,7 @@ class Backtest:
         参数:
             features: 要使用的特征列表，如果为None则使用所有特征
             position_size: 仓位大小（占总资金的比例）
-            threshold: 交易阈值，预测值超过阈值才会交易
+            threshold: 交易阈值，预测值绝对值超过阈值才会交易
             
         返回:
             回测结果字典
@@ -225,27 +229,44 @@ class Backtest:
         
         # 初始化回测状态
         cash = self.initial_capital
-        position = 0
+        position = 0  # 0表示没有持仓，正数表示多头，负数表示空头
+        position_type = "none"  # 持仓类型：多头、空头或无持仓
+        entry_price = 0  # 记录开仓价格
         
         # 记录初始状态
         timestamp = price_data.index[0]
         price = price_data.iloc[0]['close']
-        holdings = position * price
+        holdings = 0  # 初始持仓价值为0
         total_value = cash + holdings
         
         self.results['timestamp'].append(timestamp)
         self.results['price'].append(price)
         self.results['position'].append(position)
+        self.results['position_type'].append(position_type)
         self.results['cash'].append(cash)
         self.results['holdings'].append(holdings)
         self.results['total_value'].append(total_value)
         self.results['returns'].append(0)
         self.results['prediction'].append(0)
         
+        # 添加信号确认机制
+        signal_count = 0  # 连续相同信号计数
+        current_signal = 0  # 当前信号方向 (0: 无, 1: 多头, -1: 空头)
+        min_holding_periods = 6  # 最小持仓时间（小时）
+        holding_time = 0  # 当前持仓时间
+        
+        # 用于判断趋势的窗口
+        trend_window = 5
+        prev_predictions = [0] * trend_window
+        
         # 遍历每个时间点
         for i in range(1, len(common_idx)):
             timestamp = price_data.index[i]
             price = price_data.iloc[i]['close']
+            
+            # 如果持有头寸，增加持仓时间
+            if position != 0:
+                holding_time += 1
             
             # 获取当前特征数据
             current_features = feature_data.iloc[i-1:i]
@@ -266,38 +287,195 @@ class Backtest:
                 logger.error(f"预测失败: {str(e)}")
                 # 使用一个保守的预测值
                 prediction = 0
-                
+            
+            # 记录预测值用于计算趋势
+            prev_predictions.pop(0)
+            prev_predictions.append(prediction)
+            avg_prediction = sum(prev_predictions) / len(prev_predictions)
+            
             # 记录预测值
             self.results['prediction'].append(prediction)
             
-            # 根据预测值决定交易信号
-            if prediction > threshold and position == 0:  # 买入信号
-                # 计算买入数量
-                buy_amount = cash * position_size
-                buy_price = price * (1 + self.slippage)  # 考虑滑点
-                fee = buy_amount * self.trading_fee
-                shares = (buy_amount - fee) / buy_price
-                
-                # 更新状态
-                position += shares
-                cash -= (shares * buy_price + fee)
-                
-                logger.info(f"{timestamp}: 买入 {shares:.4f} 股，价格 {buy_price:.2f}，费用 {fee:.2f}，剩余现金 {cash:.2f}")
-                
-            elif prediction < -threshold and position > 0:  # 卖出信号
-                # 计算卖出金额
-                sell_price = price * (1 - self.slippage)  # 考虑滑点
-                sell_amount = position * sell_price
-                fee = sell_amount * self.trading_fee
-                
-                # 更新状态
-                cash += (sell_amount - fee)
-                position = 0
-                
-                logger.info(f"{timestamp}: 卖出全部持仓，价格 {sell_price:.2f}，费用 {fee:.2f}，现金 {cash:.2f}")
+            # 提高交易阈值，减少噪声交易
+            effective_threshold = max(threshold, 0.5)  # 基础阈值
             
-            # 计算当前持仓价值和总资产
-            holdings = position * price
+            # 计算当前持仓的未实现盈亏
+            if position != 0:
+                # 多头持仓
+                if position > 0:
+                    unrealized_pnl = position * (price - entry_price) * self.leverage
+                # 空头持仓
+                else:
+                    unrealized_pnl = abs(position) * (entry_price - price) * self.leverage
+                
+                # 计算浮动收益率，用于止损/止盈判断
+                pnl_ratio = unrealized_pnl / (abs(position) * entry_price)
+            else:
+                unrealized_pnl = 0
+                pnl_ratio = 0
+            
+            # 根据预测值和趋势确认决定交易信号
+            # 多头信号：预测值 > 阈值，且平均预测值 > 0，且没有持仓或持有空头
+            if prediction > effective_threshold and avg_prediction > 0 and (position <= 0):
+                # 潜在多头信号
+                if current_signal != 1:  # 新信号或与前一个信号方向不同
+                    current_signal = 1
+                    signal_count = 1
+                else:  # 与前一个信号方向相同
+                    signal_count += 1
+                
+                # 需要连续多个周期的相同信号才实际交易
+                if signal_count >= 3:  # 至少需要3个周期的确认
+                    # 如果有空头持仓，先平仓
+                    if position < 0:
+                        # 平空头持仓
+                        close_price = price * (1 + self.slippage)  # 平空头时，价格需要上调(买入平空)
+                        close_amount = abs(position) * close_price
+                        fee = close_amount * self.trading_fee
+                        
+                        # 计算平仓后的收益
+                        profit = abs(position) * (entry_price - close_price) * self.leverage
+                        cash += profit - fee
+                        
+                        logger.info(f"{timestamp}: 平空头 {abs(position):.4f} 股，价格 {close_price:.2f}，费用 {fee:.2f}，"
+                                   f"盈亏 {profit:.2f}，现金 {cash:.2f}")
+                        
+                        position = 0
+                        position_type = "none"
+                    
+                    # 开多头仓位
+                    order_amount = cash * position_size
+                    contract_size = order_amount * self.leverage  # 杠杆放大仓位
+                    buy_price = price * (1 + self.slippage)  # 考虑滑点
+                    fee = contract_size * self.trading_fee
+                    shares = contract_size / buy_price  # 计算合约数量
+                    
+                    # 更新状态
+                    position = shares
+                    position_type = "long"
+                    entry_price = buy_price
+                    cash -= fee  # 只扣除手续费，保证金从cash中冻结，由于已经计算了，无需再减
+                    holding_time = 0  # 重置持仓时间
+                    
+                    logger.info(f"{timestamp}: 开多头 {shares:.4f} 股，价格 {buy_price:.2f}，费用 {fee:.2f}，"
+                               f"杠杆 {self.leverage}倍，剩余现金 {cash:.2f}")
+            
+            # 空头信号：预测值 < -阈值，且平均预测值 < 0，且没有持仓或持有多头
+            elif prediction < -effective_threshold and avg_prediction < 0 and (position >= 0):
+                # 潜在空头信号
+                if current_signal != -1:  # 新信号或与前一个信号方向不同
+                    current_signal = -1
+                    signal_count = 1
+                else:  # 与前一个信号方向相同
+                    signal_count += 1
+                
+                # 需要连续多个周期的相同信号才实际交易
+                if signal_count >= 3:  # 至少需要3个周期的确认
+                    # 如果有多头持仓，先平仓
+                    if position > 0:
+                        # 平多头持仓
+                        close_price = price * (1 - self.slippage)  # 平多头时，价格需要下调(卖出平多)
+                        close_amount = position * close_price
+                        fee = close_amount * self.trading_fee
+                        
+                        # 计算平仓后的收益
+                        profit = position * (close_price - entry_price) * self.leverage
+                        cash += profit - fee
+                        
+                        logger.info(f"{timestamp}: 平多头 {position:.4f} 股，价格 {close_price:.2f}，费用 {fee:.2f}，"
+                                   f"盈亏 {profit:.2f}，现金 {cash:.2f}")
+                        
+                        position = 0
+                        position_type = "none"
+                    
+                    # 开空头仓位
+                    order_amount = cash * position_size
+                    contract_size = order_amount * self.leverage  # 杠杆放大仓位
+                    sell_price = price * (1 - self.slippage)  # 考虑滑点
+                    fee = contract_size * self.trading_fee
+                    shares = contract_size / sell_price  # 计算合约数量
+                    
+                    # 更新状态
+                    position = -shares  # 负数表示空头
+                    position_type = "short"
+                    entry_price = sell_price
+                    cash -= fee  # 只扣除手续费
+                    holding_time = 0  # 重置持仓时间
+                    
+                    logger.info(f"{timestamp}: 开空头 {shares:.4f} 股，价格 {sell_price:.2f}，费用 {fee:.2f}，"
+                               f"杠杆 {self.leverage}倍，剩余现金 {cash:.2f}")
+            
+            # 平仓信号
+            # 止损：多头下跌超过2%或空头上涨超过2%
+            # 止盈：多头上涨超过5%或空头下跌超过5%
+            # 持仓时间过长：超过48小时
+            elif ((position > 0 and pnl_ratio < -0.02) or  # 多头止损
+                 (position < 0 and pnl_ratio < -0.02) or  # 空头止损
+                 (position != 0 and (pnl_ratio > 0.05)) or  # 止盈
+                 (position != 0 and holding_time > 48)):  # 最大持仓时间
+                
+                if position > 0:  # 平多头
+                    close_price = price * (1 - self.slippage)
+                    close_amount = position * close_price
+                    fee = close_amount * self.trading_fee
+                    
+                    # 计算平仓收益
+                    profit = position * (close_price - entry_price) * self.leverage
+                    cash += profit - fee
+                    
+                    # 记录平仓原因
+                    if pnl_ratio < -0.02:
+                        reason = "多头止损"
+                    elif pnl_ratio > 0.05:
+                        reason = "多头止盈"
+                    elif holding_time > 48:
+                        reason = "持仓时间过长"
+                    else:
+                        reason = "信号平仓"
+                    
+                    logger.info(f"{timestamp}: 平多头 {position:.4f} 股，价格 {close_price:.2f}，费用 {fee:.2f}，"
+                               f"盈亏 {profit:.2f}，现金 {cash:.2f}，原因: {reason}")
+                
+                elif position < 0:  # 平空头
+                    close_price = price * (1 + self.slippage)
+                    close_amount = abs(position) * close_price
+                    fee = close_amount * self.trading_fee
+                    
+                    # 计算平仓收益
+                    profit = abs(position) * (entry_price - close_price) * self.leverage
+                    cash += profit - fee
+                    
+                    # 记录平仓原因
+                    if pnl_ratio < -0.02:
+                        reason = "空头止损"
+                    elif pnl_ratio > 0.05:
+                        reason = "空头止盈"
+                    elif holding_time > 48:
+                        reason = "持仓时间过长"
+                    else:
+                        reason = "信号平仓"
+                    
+                    logger.info(f"{timestamp}: 平空头 {abs(position):.4f} 股，价格 {close_price:.2f}，费用 {fee:.2f}，"
+                               f"盈亏 {profit:.2f}，现金 {cash:.2f}，原因: {reason}")
+                
+                # 重置状态
+                position = 0
+                position_type = "none"
+                current_signal = 0
+                signal_count = 0
+            
+            else:
+                # 无新信号，保持当前状态
+                pass
+            
+            # 计算当前持仓价值
+            if position > 0:  # 多头
+                holdings = position * price + (position * (price - entry_price) * (self.leverage - 1))
+            elif position < 0:  # 空头
+                holdings = abs(position) * entry_price - (abs(position) * (price - entry_price) * self.leverage)
+            else:
+                holdings = 0
+            
             total_value = cash + holdings
             
             # 计算收益率
@@ -307,6 +485,7 @@ class Backtest:
             self.results['timestamp'].append(timestamp)
             self.results['price'].append(price)
             self.results['position'].append(position)
+            self.results['position_type'].append(position_type)
             self.results['cash'].append(cash)
             self.results['holdings'].append(holdings)
             self.results['total_value'].append(total_value)
@@ -410,10 +589,10 @@ class Backtest:
             results_df: 回测结果DataFrame
             timestamp: 时间戳，用于文件名
         """
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(14, 10))
         
         # 绘制价格和总资产
-        ax1 = plt.subplot(2, 1, 1)
+        ax1 = plt.subplot(3, 1, 1)
         ax1.plot(results_df.index, results_df['price'], 'b-', label='Price')
         ax1.set_ylabel('Price')
         ax1.legend(loc='upper left')
@@ -423,19 +602,25 @@ class Backtest:
         ax2.set_ylabel('Portfolio Value')
         ax2.legend(loc='upper right')
         
-        # 绘制持仓情况
-        ax3 = plt.subplot(2, 1, 2)
+        # 绘制持仓情况和预测值
+        ax3 = plt.subplot(3, 1, 2)
         ax3.plot(results_df.index, results_df['position'], 'g-', label='Position')
         ax3.set_ylabel('Position')
-        ax3.set_xlabel('Date')
         ax3.legend(loc='upper left')
         
         ax4 = ax3.twinx()
-        ax4.plot(results_df.index, results_df['returns'], 'm-', label='Returns (%)')
-        ax4.set_ylabel('Returns (%)')
+        ax4.plot(results_df.index, results_df['prediction'], 'm-', label='Prediction')
+        ax4.set_ylabel('Prediction')
         ax4.legend(loc='upper right')
         
-        plt.title('Backtest Results')
+        # 绘制收益率
+        ax5 = plt.subplot(3, 1, 3)
+        ax5.plot(results_df.index, results_df['returns'], 'c-', label='Returns (%)')
+        ax5.set_ylabel('Returns (%)')
+        ax5.set_xlabel('Date')
+        ax5.legend(loc='upper left')
+        
+        plt.title('Futures Trading Backtest Results')
         plt.tight_layout()
         
         # 保存图表
@@ -469,6 +654,7 @@ def parse_args():
     parser.add_argument("--slippage", type=float, default=0.0005, help="滑点（占比）")
     parser.add_argument("--position_size", type=float, default=0.2, help="仓位大小（总资金占比）")
     parser.add_argument("--threshold", type=float, default=0.0, help="交易阈值")
+    parser.add_argument("--leverage", type=float, default=3.0, help="杠杆倍数")
     
     # 输出参数
     parser.add_argument("--output_dir", type=str, default="results/backtest", help="输出目录")
@@ -533,6 +719,7 @@ def main():
             initial_capital=args.initial_capital,
             trading_fee=args.trading_fee,
             slippage=args.slippage,
+            leverage=args.leverage,
             output_dir=args.output_dir
         )
         
