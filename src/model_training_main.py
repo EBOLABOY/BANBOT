@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
 import matplotlib.pyplot as plt
+import logging
 
 from src.utils.logger import setup_logging, get_logger
 from src.utils.config import load_config
@@ -73,8 +74,8 @@ def main():
     args = parse_args()
     
     # 设置日志
-    log_level = "DEBUG" if args.verbose else "INFO"
-    setup_logging(log_level=log_level)
+    default_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(config_path=args.config, default_level=default_level)
     
     logger.info("开始模型训练流程")
     
