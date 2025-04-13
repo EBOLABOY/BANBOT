@@ -93,9 +93,67 @@ class Backtest:
         """
         try:
             with open(model_path, 'rb') as f:
-                model = pickle.load(f)
+                model_data = pickle.load(f)
             logger.info(f"模型已从 {model_path} 加载")
-            return model
+            
+            # 添加调试信息
+            logger.info(f"模型类型: {type(model_data)}")
+            
+            # 处理模型是字典的情况
+            if isinstance(model_data, dict):
+                logger.info(f"模型是字典类型，键列表: {list(model_data.keys())}")
+                
+                # 检查字典中是否有model键
+                if 'model' in model_data:
+                    logger.info("使用'model'键中的模型对象")
+                    return model_data['model']
+                # 或者检查是否有trained_model键
+                elif 'trained_model' in model_data:
+                    logger.info("使用'trained_model'键中的模型对象")
+                    return model_data['trained_model']
+                # 如果有model_obj键
+                elif 'model_obj' in model_data:
+                    logger.info("使用'model_obj'键中的模型对象")
+                    return model_data['model_obj']
+                # 如果存在base_model
+                elif 'base_model' in model_data:
+                    logger.info("使用'base_model'键中的模型对象")
+                    return model_data['base_model']
+                else:
+                    # 尝试查找可能的模型对象
+                    for key, value in model_data.items():
+                        # 检查value是否有predict方法
+                        if hasattr(value, 'predict'):
+                            logger.info(f"在键 '{key}' 中找到模型对象")
+                            return value
+                    
+                    # 尝试查找xgb_model属性
+                    for key, value in model_data.items():
+                        if hasattr(value, 'xgb_model') and hasattr(value.xgb_model, 'predict'):
+                            logger.info(f"在键 '{key}.xgb_model' 中找到模型对象")
+                            return value.xgb_model
+                    
+                    # 如果找不到模型对象，输出字典的键以供诊断
+                    logger.error(f"无法在模型字典中找到有效的模型对象。可用键: {list(model_data.keys())}")
+                    
+                    # 输出更多调试信息
+                    for key, value in model_data.items():
+                        logger.info(f"键 '{key}' 的值类型: {type(value)}")
+                        
+                    raise ValueError("加载的模型字典中没有有效的模型对象")
+            
+            # 如果模型本身就有predict方法
+            if hasattr(model_data, 'predict'):
+                logger.info("加载的对象直接具有predict方法")
+                return model_data
+                
+            # 如果不是字典且没有predict方法，尝试查找xgb_model属性
+            if hasattr(model_data, 'xgb_model'):
+                logger.info("使用模型的xgb_model属性")
+                return model_data.xgb_model
+                
+            logger.error(f"未知的模型类型: {type(model_data)}")
+            raise ValueError(f"未能识别的模型类型: {type(model_data)}")
         except Exception as e:
             logger.error(f"加载模型时出错: {str(e)}")
             raise
@@ -192,9 +250,23 @@ class Backtest:
             # 获取当前特征数据
             current_features = feature_data.iloc[i-1:i]
             
-            # 进行预测
-            prediction = self.model.predict(current_features)[0]
-            
+            # 进行预测，增强健壮性
+            try:
+                # 尝试直接预测
+                prediction_result = self.model.predict(current_features)
+                
+                # 处理结果可能是数组的情况
+                if isinstance(prediction_result, (list, np.ndarray)):
+                    prediction = prediction_result[0]
+                else:
+                    prediction = prediction_result
+                    
+                logger.debug(f"预测值: {prediction}")
+            except Exception as e:
+                logger.error(f"预测失败: {str(e)}")
+                # 使用一个保守的预测值
+                prediction = 0
+                
             # 记录预测值
             self.results['prediction'].append(prediction)
             
