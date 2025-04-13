@@ -67,7 +67,7 @@ def main():
     
     # 设置日志
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    setup_logging(log_level=log_level)
+    setup_logging(config_path=args.config, default_level=log_level)
     
     logger.info("开始特征工程流程")
     
