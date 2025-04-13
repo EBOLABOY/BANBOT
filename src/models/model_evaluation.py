@@ -70,21 +70,40 @@ class ModelEvaluator:
         # 进行预测
         y_pred = model.predict(X_test)
         
-        # 转换为numpy数组以进行评估
+        # 转换为numpy数组以进行评估，同时确保没有无效值
         if isinstance(y_test, pd.Series) or isinstance(y_test, pd.DataFrame):
-            y_test = y_test.values.ravel()
+            y_test_np = y_test.values.ravel()
+        else:
+            y_test_np = y_test.ravel() if hasattr(y_test, 'ravel') else np.array(y_test)
+        
+        # 检查是否有无效值
+        invalid_mask = np.isnan(y_test_np) | ~np.isfinite(y_test_np)
+        if invalid_mask.any():
+            logger.warning(f"评估前发现{invalid_mask.sum()}个无效值，将在计算指标时忽略这些值")
+            # 创建有效值的掩码
+            valid_mask = ~invalid_mask
+            y_test_valid = y_test_np[valid_mask]
+            y_pred_valid = y_pred[valid_mask]
+        else:
+            y_test_valid = y_test_np
+            y_pred_valid = y_pred
+        
+        # 如果没有有效值，则返回默认指标
+        if len(y_test_valid) == 0:
+            logger.error("评估数据中没有有效值，无法计算指标")
+            return {"rmse": 0.0, "mae": 0.0, "r2": 0.0}
             
         # 计算回归指标
         metrics = {
-            "rmse": float(np.sqrt(mean_squared_error(y_test, y_pred))),
-            "mae": float(mean_absolute_error(y_test, y_pred)),
-            "r2": float(r2_score(y_test, y_pred))
+            "rmse": float(np.sqrt(mean_squared_error(y_test_valid, y_pred_valid))),
+            "mae": float(mean_absolute_error(y_test_valid, y_pred_valid)),
+            "r2": float(r2_score(y_test_valid, y_pred_valid))
         }
         
         # 方向准确率（对于价格变化预测）
         if model.target_type == "price_change_pct":
-            direction_actual = np.sign(y_test)
-            direction_pred = np.sign(y_pred)
+            direction_actual = np.sign(y_test_valid)
+            direction_pred = np.sign(y_pred_valid)
             metrics["direction_accuracy"] = float(accuracy_score(direction_actual, direction_pred))
         
         # 输出评估结果
@@ -95,7 +114,7 @@ class ModelEvaluator:
         # 如果需要保存结果
         if self.save_results:
             self._save_evaluation_results(metrics, model, model_name, "regression")
-            self._plot_regression_results(y_test, y_pred, model_name)
+            self._plot_regression_results(y_test_valid, y_pred_valid, model_name)
         
         return metrics
     
@@ -126,16 +145,35 @@ class ModelEvaluator:
         # 进行预测
         y_pred = model.predict(X_test)
         
-        # 转换为numpy数组以进行评估
+        # 转换为numpy数组以进行评估，同时确保没有无效值
         if isinstance(y_test, pd.Series) or isinstance(y_test, pd.DataFrame):
-            y_test = y_test.values.ravel()
+            y_test_np = y_test.values.ravel()
+        else:
+            y_test_np = y_test.ravel() if hasattr(y_test, 'ravel') else np.array(y_test)
+        
+        # 检查是否有无效值
+        invalid_mask = np.isnan(y_test_np) | ~np.isfinite(y_test_np)
+        if invalid_mask.any():
+            logger.warning(f"评估前发现{invalid_mask.sum()}个无效值，将在计算指标时忽略这些值")
+            # 创建有效值的掩码
+            valid_mask = ~invalid_mask
+            y_test_valid = y_test_np[valid_mask]
+            y_pred_valid = y_pred[valid_mask]
+        else:
+            y_test_valid = y_test_np
+            y_pred_valid = y_pred
+        
+        # 如果没有有效值，则返回默认指标
+        if len(y_test_valid) == 0:
+            logger.error("评估数据中没有有效值，无法计算指标")
+            return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
             
         # 计算分类指标
         metrics = {
-            "accuracy": float(accuracy_score(y_test, y_pred)),
-            "precision": float(precision_score(y_test, y_pred, average="weighted")),
-            "recall": float(recall_score(y_test, y_pred, average="weighted")),
-            "f1": float(f1_score(y_test, y_pred, average="weighted"))
+            "accuracy": float(accuracy_score(y_test_valid, y_pred_valid)),
+            "precision": float(precision_score(y_test_valid, y_pred_valid, average="weighted")),
+            "recall": float(recall_score(y_test_valid, y_pred_valid, average="weighted")),
+            "f1": float(f1_score(y_test_valid, y_pred_valid, average="weighted"))
         }
         
         # 如果模型支持概率预测，计算AUC
@@ -148,10 +186,14 @@ class ModelEvaluator:
                 # 二分类情况
                 if len(y_proba.shape) > 1:
                     y_proba = y_proba[:, 1]
-                metrics["auc"] = float(roc_auc_score(y_test, y_proba))
-        except (NotImplementedError, AttributeError):
-            # 如果模型不支持概率预测，则忽略AUC
-            pass
+                if invalid_mask.any():
+                    y_proba_valid = y_proba[valid_mask]
+                else:
+                    y_proba_valid = y_proba
+                metrics["auc"] = float(roc_auc_score(y_test_valid, y_proba_valid))
+        except (NotImplementedError, AttributeError, ValueError) as e:
+            # 如果模型不支持概率预测，或者其他错误，则忽略AUC
+            logger.warning(f"无法计算AUC: {str(e)}")
             
         # 输出评估结果
         logger.info(f"模型 {model_name} 评估结果：")
@@ -161,7 +203,7 @@ class ModelEvaluator:
         # 如果需要保存结果
         if self.save_results:
             self._save_evaluation_results(metrics, model, model_name, "classification")
-            self._plot_confusion_matrix(y_test, y_pred, model_name)
+            self._plot_confusion_matrix(y_test_valid, y_pred_valid, model_name)
         
         return metrics
     
@@ -182,11 +224,71 @@ class ModelEvaluator:
         返回:
             Dict[str, float]: 包含各项评估指标的字典
         """
+        # 数据清洗：处理测试数据中的无效值
+        logger.info(f"评估模型前进行数据清洗，原始数据形状：X_test={X_test.shape}, y_test={y_test.shape}")
+        
+        # 处理特征数据
+        if isinstance(X_test, pd.DataFrame):
+            X_test_clean = X_test.copy()
+            # 检查并处理NaN值
+            if X_test_clean.isna().sum().sum() > 0:
+                logger.warning(f"测试特征数据中发现NaN值，使用前向填充和后向填充处理")
+                X_test_clean = X_test_clean.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            
+            # 检查并处理无穷大值
+            inf_mask = ~np.isfinite(X_test_clean)
+            if inf_mask.values.any():
+                logger.warning(f"测试特征数据中发现无穷大值，将替换为0")
+                X_test_clean = X_test_clean.replace([np.inf, -np.inf], 0)
+        else:  # numpy array
+            X_test_clean = X_test.copy()
+            # 处理NaN值
+            if np.isnan(X_test_clean).any():
+                logger.warning(f"测试特征数据中发现NaN值，将替换为0")
+                X_test_clean[np.isnan(X_test_clean)] = 0
+            
+            # 处理无穷大值
+            inf_mask = ~np.isfinite(X_test_clean)
+            if inf_mask.any():
+                logger.warning(f"测试特征数据中发现无穷大值，将替换为0")
+                X_test_clean[inf_mask] = 0
+        
+        # 处理目标数据
+        if isinstance(y_test, pd.Series):
+            y_test_clean = y_test.copy()
+            # 检查并处理NaN和无穷大值
+            nan_mask = y_test_clean.isna()
+            inf_mask = ~np.isfinite(y_test_clean)
+            invalid_mask = nan_mask | inf_mask
+            
+            if invalid_mask.any():
+                invalid_count = invalid_mask.sum()
+                logger.warning(f"测试目标数据中发现{invalid_count}个无效值，将替换为0")
+                
+                # 替换无效值
+                y_test_clean = y_test_clean.fillna(0)
+                y_test_clean[inf_mask] = 0
+        else:  # numpy array
+            y_test_clean = y_test.copy()
+            # 处理NaN值
+            nan_mask = np.isnan(y_test_clean)
+            if nan_mask.any():
+                logger.warning(f"测试目标数据中发现NaN值，将替换为0")
+                y_test_clean[nan_mask] = 0
+            
+            # 处理无穷大值
+            inf_mask = ~np.isfinite(y_test_clean)
+            if inf_mask.any():
+                logger.warning(f"测试目标数据中发现无穷大值，将替换为0")
+                y_test_clean[inf_mask] = 0
+        
+        logger.info(f"数据清洗完成，清洗后数据形状：X_test={X_test_clean.shape}, y_test={y_test_clean.shape}")
+        
         # 根据目标类型选择评估方法
         if model.target_type == "direction":
-            return self.evaluate_classification_model(model, X_test, y_test, model_name)
+            return self.evaluate_classification_model(model, X_test_clean, y_test_clean, model_name)
         else:
-            return self.evaluate_regression_model(model, X_test, y_test, model_name)
+            return self.evaluate_regression_model(model, X_test_clean, y_test_clean, model_name)
     
     def compare_models(self, 
                       models: List[BaseModel], 
