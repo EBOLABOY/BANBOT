@@ -406,9 +406,9 @@ class ModelEvaluator:
         plt.plot([-1, 1], [-1, 1], 'r--')  # 对角线
         plt.xlim(min(y_true), max(y_true))
         plt.ylim(min(y_pred), max(y_pred))
-        plt.title(f"{model_name} - 预测值 vs 实际值")
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
+        plt.title(f"{model_name} - Predicted vs Actual")
+        plt.xlabel("Actual Values")
+        plt.ylabel("Predicted Values")
         plt.grid(True)
         
         # 添加RMSE和R²文本
@@ -423,7 +423,7 @@ class ModelEvaluator:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"回归结果图表已保存至 {output_path}")
+        logger.info(f"Regression plot saved to {output_path}")
     
     def _plot_confusion_matrix(self, 
                               y_true: np.ndarray, 
@@ -450,7 +450,7 @@ class ModelEvaluator:
         # 创建图表
         plt.figure(figsize=(8, 6))
         plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-        plt.title(f"{model_name} - 混淆矩阵")
+        plt.title(f"{model_name} - Confusion Matrix")
         plt.colorbar()
         
         # 添加刻度标签
@@ -467,8 +467,8 @@ class ModelEvaluator:
                         ha="center", va="center",
                         color="white" if cm[i, j] > thresh else "black")
         
-        plt.ylabel('实际类别')
-        plt.xlabel('预测类别')
+        plt.ylabel('Actual Class')
+        plt.xlabel('Predicted Class')
         plt.tight_layout()
         
         # 保存图表
@@ -476,7 +476,7 @@ class ModelEvaluator:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"混淆矩阵已保存至 {output_path}")
+        logger.info(f"Confusion matrix saved to {output_path}")
         
         # 输出分类报告
         report = classification_report(y_true, y_pred, output_dict=True)
@@ -486,7 +486,7 @@ class ModelEvaluator:
         report_path = os.path.join(model_eval_dir, f"classification_report_{timestamp}.csv")
         report_df.to_csv(report_path)
         
-        logger.info(f"分类报告已保存至 {report_path}")
+        logger.info(f"Classification report saved to {report_path}")
     
     def _plot_model_comparison(self, results_df: pd.DataFrame) -> None:
         """
@@ -518,9 +518,9 @@ class ModelEvaluator:
         for metric in metrics_to_plot:
             plt.figure(figsize=(10, 6))
             ax = results_df[metric].sort_values().plot(kind='barh')
-            plt.title(f"模型比较 - {metric}")
+            plt.title(f"Model Comparison - {metric}")
             plt.xlabel(metric)
-            plt.ylabel("模型")
+            plt.ylabel("Model")
             plt.grid(axis='x', linestyle='--', alpha=0.7)
             
             # 在条形上添加数值标签
@@ -532,7 +532,7 @@ class ModelEvaluator:
             plt.savefig(output_path, dpi=300, bbox_inches='tight')
             plt.close()
             
-            logger.info(f"模型比较图表 ({metric}) 已保存至 {output_path}")
+            logger.info(f"Model comparison chart ({metric}) saved to {output_path}")
         
         # 创建雷达图（如果有足够的指标）
         if len(metrics_to_plot) >= 3:
