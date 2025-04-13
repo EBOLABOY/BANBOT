@@ -13,11 +13,11 @@ from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from typing import Dict, List, Tuple, Union, Optional
 import matplotlib.pyplot as plt
 
-from utils.logger import setup_logging, get_logger
-from utils.config import load_config
-from models.base_model import BaseModel
-from models.traditional_models import LinearModel, TreeModel, XGBoostModel
-from models.model_evaluation import ModelEvaluator
+from src.utils.logger import setup_logging, get_logger
+from src.utils.config import load_config
+from src.models.base_model import BaseModel
+from src.models.traditional_models import LinearModel, TreeModel, XGBoostModel
+from src.models.model_evaluation import ModelEvaluator
 
 logger = get_logger(__name__)
 
