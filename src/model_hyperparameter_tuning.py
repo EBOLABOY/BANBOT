@@ -114,9 +114,14 @@ class XGBoostOptimizer:
                 target_type="price_change_pct"
             )
             
-            # 训练模型
-            model.fit(X_train, y_train, X_val, y_val)
+            # 训练模型 - 调用 train 方法
+            model.train(X_train, y_train, validation_data=(X_val, y_val))
             
+            # 检查模型是否已训练
+            if not model.trained:
+                logger.warning(f"试验 #{trial.number}: 模型训练失败，跳过此折叠")
+                continue # 或者返回一个很大的惩罚值，例如 float('inf')
+                
             # 预测
             y_pred = model.predict(X_val)
             
@@ -231,9 +236,10 @@ class XGBoostOptimizer:
             target_type=target_type
         )
         
-        # 训练模型
+        # 使用最佳参数训练模型
         logger.info("使用最佳参数训练模型...")
-        model = model.fit(X_train, y_train, X_val, y_val)
+        # 调用 train 方法
+        model = model.train(X_train, y_train, validation_data=(X_val, y_val))
         
         # 评估模型
         train_score = model.score(X_train, y_train)
