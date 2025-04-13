@@ -409,7 +409,15 @@ class XGBoostModel(BaseModel):
         if validation_data is not None:
             X_val, y_val = validation_data
             fit_params["eval_set"] = [(X, y), (X_val, y_val)]
-            fit_params["early_stopping_rounds"] = self.early_stopping_rounds
+            # 在新版XGBoost中，early_stopping_rounds已移至callbacks参数
+            # 创建早停回调
+            callbacks = [xgb.callback.EarlyStopping(
+                rounds=self.early_stopping_rounds,
+                metric_name=self.eval_metric,
+                save_best=True,
+                maximize=(self.eval_metric == 'auc')  # AUC需要最大化，其他如RMSE需要最小化
+            )]
+            fit_params["callbacks"] = callbacks
             fit_params["eval_metric"] = self.eval_metric
         
         # 训练模型
