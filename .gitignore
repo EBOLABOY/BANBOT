@@ -33,12 +33,6 @@ trading_env/
 # 日志文件
 *.log
 
-# 数据文件（按需修改）
-# data/*.csv
-
-# 模型文件（可能很大）
-# models/*.pth
-
 # 系统文件
 .DS_Store
 Thumbs.db
@@ -51,28 +45,56 @@ desktop.ini
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# OS generated files
-.DS_Store
-Thumbs.db
+# 数据文件 (忽略所有数据，但保留目录结构)
+# 忽略所有数据文件
+data/**/*.csv
+data/**/*.json
+data/**/*.xlsx
+data/**/*.parquet
+data/**/*.h5
+data/**/*.pickle
+data/**/*.npz
+data/**/*.npy
 
-# IDEs and editors
-.vscode/
-.idea/
-
-# Data files (通常很大，不适合直接上传)
-data/
+# 保留目录结构
+!data/
+!data/raw/
+!data/processed/
+!data/processed/merged/
+!data/processed/features/
+!data/external/
 !data/model_ready/
-# data/processed/*.csv
+!data/**/.gitkeep
 
-# Model artifacts (通常很大，且是运行生成的)
-models/
-*.pth
-*.pt
-*.joblib
-*.onnx
+# 模型文件 (通常很大)
+models/**/*.pth
+models/**/*.pt
+models/**/*.joblib
+models/**/*.onnx
+models/**/*.keras
+models/**/*.h5
+models/**/*.weights
+models/**/*.bin
+
+# 保留模型目录结构
+!models/
+!models/saved_models/
+!models/**/.gitkeep
+
+# 日志目录
 logs/
-*.png
-# *.csv # 忽略 models 文件夹下的 csv
+!logs/.gitkeep
+
+# 缓存文件
+*.npz
+*.pkl
+*.pyc
+
+# 大型文件
+*.zip
+*.tar.gz
+*.tar
+*.rar
 
 # 添加其他你不想上传的文件或文件夹
 # data/raw/

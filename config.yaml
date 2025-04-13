@@ -1,0 +1,129 @@
+# 项目配置文件
+
+# 数据配置
+data:
+  # 目标加密货币
+  target_currencies:
+    - BTC
+    - ETH
+    - BNB
+    - XRP
+    - ADA
+  
+  # 基础货币
+  base_currency: USDT
+  
+  # 时间间隔（分钟）
+  timeframes:
+    - 1      # 1分钟
+    - 5      # 5分钟
+    - 15     # 15分钟
+    - 60     # 1小时
+    - 240    # 4小时
+    - 1440   # 1天
+
+  # 历史数据收集
+  historical:
+    lookback_days: 730  # 两年数据
+    start_date: "2022-01-01"
+    end_date: "2024-01-01"
+  
+  # 数据来源
+  sources:
+    - name: binance
+      priority: 1
+      api_key: ${BINANCE_API_KEY}
+      api_secret: ${BINANCE_API_SECRET}
+    
+    - name: coinbase
+      priority: 2
+      api_key: ${COINBASE_API_KEY}
+      api_secret: ${COINBASE_API_SECRET}
+
+  # 数据存储
+  storage:
+    type: influxdb
+    host: localhost
+    port: 8086
+    database: crypto_data
+    username: ${INFLUXDB_USER}
+    password: ${INFLUXDB_PASSWORD}
+
+# 特征工程配置
+features:
+  # 技术指标窗口大小
+  windows:
+    short: [5, 10, 20]
+    medium: [50, 100, 200]
+    long: [500, 1000]
+  
+  # 特征组
+  groups:
+    - price_based      # 基于价格的特征
+    - volume_based     # 基于交易量的特征
+    - volatility       # 波动性特征
+    - trend            # 趋势特征
+    - momentum         # 动量特征
+    - market_microstructure  # 市场微观结构特征
+
+# 模型配置
+models:
+  # 预测目标
+  prediction_targets:
+    - price_change_pct     # 价格变化百分比
+    - direction            # 方向（上涨/下跌）
+    - volatility           # 波动性预测
+  
+  # 预测时间窗口（分钟）
+  prediction_horizons:
+    short: [60, 240]       # 1小时, 4小时
+    medium: [1440, 4320]   # 1天, 3天
+    long: [10080, 20160]   # 7天, 14天
+  
+  # 模型类型
+  model_types:
+    - lstm
+    - gru
+    - transformer
+    - xgboost
+    - lightgbm
+    - ensemble
+  
+  # 训练参数
+  training:
+    test_size: 0.2
+    val_size: 0.1
+    shuffle: false
+    batch_size: 64
+    epochs: 100
+    early_stopping: 10
+    learning_rate: 0.001
+
+# 评估配置
+evaluation:
+  metrics:
+    - direction_accuracy
+    - rmse
+    - mae
+    - sharpe_ratio
+    - max_drawdown
+  
+  # 回测参数
+  backtest:
+    initial_capital: 10000
+    trading_fee: 0.001
+    slippage: 0.0005
+
+# 系统配置
+system:
+  # 日志配置
+  logging:
+    level: INFO
+    file: logs/crypto_prediction.log
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # API服务配置
+  api:
+    host: 0.0.0.0
+    port: 8000
+    debug: false 
