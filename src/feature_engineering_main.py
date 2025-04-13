@@ -158,7 +158,7 @@ def main():
                         targets_df = feature_engineer.load_data(target_path)
                         
                         # 确定目标列名
-                        target_col = f"target_{target_type.split('_')[0]}_{target_horizon}"
+                        target_col = f"target_pct_{target_horizon}"
                         
                         if target_col not in targets_df.columns:
                             logger.warning(f"找不到目标列 {target_col} 在 {target_path}")
