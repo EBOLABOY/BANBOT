@@ -104,24 +104,12 @@ def train_baseline_model(X_train, y_train, X_val, y_val, output_dir="data/result
         random_state=42
     )
     
-    # 训练模型 - 使用新的XGBoost API
-    # 注意：新版XGBoost不再直接支持eval_metric参数，而是使用callbacks
-    
-    # 创建早停回调
-    early_stopping = EarlyStopping(
-        rounds=10,
-        min_delta=0.00001,
-        save_best=True,
-        maximize=False,
-        data_name="validation",
-        metric_name="rmse"
-    )
-    
-    # 训练模型
+    # 训练模型 - 使用直接参数而不是回调
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        callback=[early_stopping],
+        early_stopping_rounds=10,
+        eval_metric="rmse",
         verbose=False
     )
     

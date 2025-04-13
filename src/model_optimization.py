@@ -199,20 +199,11 @@ class ModelOptimizer:
         # 记录开始时间
         start_time = time.time()
         
-        # 创建早停回调
-        early_stopping = EarlyStopping(
-            rounds=early_stopping_rounds,
-            min_delta=0.00001,
-            save_best=True,
-            maximize=False,
-            data_name="validation",
-            metric_name="rmse"
-        )
-        
         search.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callback=[early_stopping],
+            early_stopping_rounds=early_stopping_rounds,
+            eval_metric="rmse",
             verbose=False
         )
         
@@ -236,7 +227,8 @@ class ModelOptimizer:
         best_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callback=[early_stopping],
+            early_stopping_rounds=early_stopping_rounds,
+            eval_metric="rmse",
             verbose=False
         )
         
