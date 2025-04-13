@@ -37,6 +37,11 @@ def load_data(feature_path: str, target_path: str, target_column: str = None) ->
     # 加载特征数据
     features_df = pd.read_csv(feature_path, index_col=0, parse_dates=True)
     
+    # 检查是否是跨周期特征（通过检查列名前缀）
+    is_cross_timeframe = any('_' in col and col.split('_')[0] in ['1h', '4h', '1d', '1m', '5m', '15m'] for col in features_df.columns)
+    if is_cross_timeframe:
+        logger.info("检测到跨周期特征数据")
+    
     # 加载目标数据
     targets_df = pd.read_csv(target_path, index_col=0, parse_dates=True)
     
@@ -53,18 +58,95 @@ def load_data(feature_path: str, target_path: str, target_column: str = None) ->
     if target_column not in targets_df.columns:
         raise ValueError(f"在目标文件{target_path}中找不到列: {target_column}")
     
-    # 确保索引对齐
-    common_index = features_df.index.intersection(targets_df.index)
-    if len(common_index) == 0:
-        raise ValueError("特征和目标数据没有共同的索引")
+    # 确保索引对齐 - 处理时区和格式问题
+    features_index = features_df.index
+    targets_index = targets_df.index
     
+    # 移除可能的时区信息以便更一致地比较
+    if features_index.tz is not None:
+        features_index = features_index.tz_localize(None)
+        features_df.index = features_index
+    
+    if targets_index.tz is not None:
+        targets_index = targets_index.tz_localize(None)
+        targets_df.index = targets_index
+    
+    # 找出公共索引
+    common_index = features_index.intersection(targets_index)
+    if len(common_index) == 0:
+        # 尝试将目标索引转换为特征索引的格式
+        if len(features_index) > 0 and len(targets_index) > 0:
+            logger.warning("找不到共同索引，尝试统一索引格式")
+            # 获取索引格式示例
+            feature_idx_example = str(features_index[0])
+            target_idx_example = str(targets_index[0])
+            logger.debug(f"特征索引格式: {feature_idx_example}")
+            logger.debug(f"目标索引格式: {target_idx_example}")
+            
+            # 尝试转换
+            try:
+                # 尝试不同的日期格式
+                formats = [
+                    '%Y-%m-%d %H:%M:%S', 
+                    '%Y-%m-%d %H:%M:%S%z', 
+                    '%Y-%m-%d',
+                    '%Y/%m/%d %H:%M:%S',
+                    '%Y%m%d %H:%M:%S'
+                ]
+                
+                for date_format in formats:
+                    try:
+                        # 如果特征和目标索引的格式不同，尝试统一它们
+                        targets_df.index = pd.to_datetime(targets_df.index.astype(str), format=date_format)
+                        common_index = features_index.intersection(targets_df.index)
+                        if len(common_index) > 0:
+                            logger.info(f"成功使用格式 {date_format} 统一索引")
+                            break
+                    except:
+                        continue
+            except Exception as e:
+                logger.error(f"转换索引格式时出错: {str(e)}")
+        
+        if len(common_index) == 0:
+            raise ValueError("特征和目标数据没有共同的索引，且无法自动调整")
+    
+    # 如果特征和目标时间不完全一致，可能需要调整
+    if len(features_df) != len(targets_df) or not features_df.index.equals(targets_df.index):
+        logger.warning(f"特征和目标数据长度或索引不一致: 特征={len(features_df)}, 目标={len(targets_df)}")
+        logger.warning(f"使用它们的交集: {len(common_index)} 条记录")
+    
+    # 提取共同索引对应的数据
     features_df = features_df.loc[common_index]
     targets_df = targets_df.loc[common_index]
     
     # 提取目标列
     target_series = targets_df[target_column]
     
+    # 检查并处理NaN值
+    nan_count_features = features_df.isna().sum().sum()
+    nan_count_target = target_series.isna().sum()
+    
+    if nan_count_features > 0:
+        logger.warning(f"特征数据中有 {nan_count_features} 个缺失值")
+        # 记录每列的缺失值数量
+        for col in features_df.columns:
+            col_nan = features_df[col].isna().sum()
+            if col_nan > 0:
+                logger.debug(f"  - 列 '{col}' 有 {col_nan} 个缺失值")
+    
+    if nan_count_target > 0:
+        logger.warning(f"目标数据中有 {nan_count_target} 个缺失值")
+    
+    # 去除包含NaN的行
+    if nan_count_features > 0 or nan_count_target > 0:
+        logger.info("去除包含NaN的行")
+        valid_index = ~(features_df.isna().any(axis=1) | target_series.isna())
+        features_df = features_df[valid_index]
+        target_series = target_series[valid_index]
+        logger.info(f"去除NaN后的数据: 特征={features_df.shape}, 目标={target_series.shape}")
+    
     logger.info(f"已加载数据: 特征={features_df.shape}, 目标={target_series.shape}")
+    logger.info(f"时间范围: {features_df.index.min()} 到 {features_df.index.max()}")
     
     return features_df, target_series
 

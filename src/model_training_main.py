@@ -37,6 +37,9 @@ def parse_args():
     parser.add_argument("--target_file", type=str, help="目标文件路径，如不指定则根据symbol和timeframe自动生成")
     parser.add_argument("--features", type=str, help="要使用的特征列表，逗号分隔")
     parser.add_argument("--target_column", type=str, help="目标变量列名")
+    parser.add_argument("--feature_type", type=str, default="standard", 
+                      choices=["standard", "cross_timeframe"], 
+                      help="特征类型：标准特征或跨周期特征")
     
     # 模型参数
     parser.add_argument("--model_type", type=str, default="xgboost",
@@ -85,17 +88,26 @@ def main():
         
         # 确定特征和目标文件路径
         if args.feature_file is None:
-            # 自动生成特征文件路径
-            feature_dir = os.path.join("data/processed/features", args.symbol)
-            args.feature_file = os.path.join(feature_dir, f"features_{args.timeframe}.csv")
+            if args.feature_type == "standard":
+                # 自动生成标准特征文件路径
+                feature_dir = os.path.join("data/processed/features", args.symbol)
+                args.feature_file = os.path.join(feature_dir, f"features_{args.timeframe}.csv")
+            elif args.feature_type == "cross_timeframe":
+                # 自动生成跨周期特征文件路径
+                feature_dir = "data/processed/features/cross_timeframe"
+                timeframes = ["1h", "4h", "1d"]  # 默认跨周期组合
+                timeframes_str = "_".join(timeframes)
+                args.feature_file = os.path.join(feature_dir, f"{args.symbol}_multi_tf_{timeframes_str}.csv")
+                logger.info(f"使用跨周期特征: {timeframes_str}")
             
         if args.target_file is None:
-            # 自动生成目标文件路径
+            # 自动生成目标文件路径（目标文件总是基于基础时间框架）
             target_dir = os.path.join("data/processed/features", args.symbol)
             args.target_file = os.path.join(target_dir, f"targets_{args.timeframe}.csv")
         
         logger.info(f"特征文件: {args.feature_file}")
         logger.info(f"目标文件: {args.target_file}")
+        logger.info(f"特征类型: {args.feature_type}")
         
         # 如果指定了目标列，记录
         if args.target_column:
@@ -113,8 +125,29 @@ def main():
         
         # 如果指定了特定特征，则只使用这些特征
         if hasattr(args, 'features') and args.features:
-            selected_features = args.features.split(',')
-            logger.info(f"使用选定的特征: {selected_features}")
+            # 检查是否是预定义的特征组
+            if args.features in config.get("models", {}).get("feature_sets", {}):
+                selected_features = config["models"]["feature_sets"][args.features]
+                logger.info(f"使用预定义特征组 '{args.features}': {selected_features}")
+            else:
+                # 直接使用逗号分隔的特征列表
+                selected_features = args.features.split(',')
+                logger.info(f"使用自定义特征列表: {selected_features}")
+            
+            # 如果是跨周期特征，需要添加时间框架前缀
+            if args.feature_type == "cross_timeframe":
+                prefixed_features = []
+                timeframes = ["1h", "4h", "1d"]  # 默认跨周期组合
+                
+                for feature in selected_features:
+                    for tf in timeframes:
+                        prefixed_feature = f"{tf}_{feature}"
+                        # 检查特征是否存在
+                        if prefixed_feature in X.columns:
+                            prefixed_features.append(prefixed_feature)
+                
+                selected_features = prefixed_features
+                logger.info(f"跨周期特征前缀处理后: {selected_features}")
             
             # 检查选定的特征是否存在于数据中
             missing_features = [f for f in selected_features if f not in X.columns]
