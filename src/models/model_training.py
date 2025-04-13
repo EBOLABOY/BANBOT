@@ -139,11 +139,64 @@ def load_data(feature_path: str, target_path: str, target_column: str = None) ->
     
     # 去除包含NaN的行
     if nan_count_features > 0 or nan_count_target > 0:
-        logger.info("去除包含NaN的行")
-        valid_index = ~(features_df.isna().any(axis=1) | target_series.isna())
-        features_df = features_df[valid_index]
-        target_series = target_series[valid_index]
-        logger.info(f"去除NaN后的数据: 特征={features_df.shape}, 目标={target_series.shape}")
+        logger.info("处理数据中的NaN值")
+        
+        # 处理特征中的NaN
+        if nan_count_features > 0:
+            logger.info("使用前向填充和后向填充处理特征中的NaN值")
+            # 先用前向填充，再用后向填充
+            features_df = features_df.fillna(method='ffill').fillna(method='bfill')
+            
+            # 检查是否还有NaN
+            remaining_nans = features_df.isna().sum().sum()
+            if remaining_nans > 0:
+                logger.warning(f"填充后特征中仍有 {remaining_nans} 个NaN值，将用0填充")
+                features_df = features_df.fillna(0)
+        
+        # 处理目标中的NaN
+        if nan_count_target > 0:
+            # 检查目标是否全为NaN
+            if nan_count_target == len(target_series):
+                logger.error(f"目标列 '{target_column}' 全是NaN值，无法训练模型")
+                
+                # 尝试查找其他可用目标列
+                other_targets = [col for col in targets_df.columns if col != target_column and col.startswith('target_')]
+                if other_targets:
+                    # 检查其他目标列的可用性
+                    for other_col in other_targets:
+                        other_nan_count = targets_df[other_col].isna().sum()
+                        valid_ratio = 1 - (other_nan_count / len(targets_df))
+                        if valid_ratio > 0.3:  # 如果至少30%的值有效
+                            logger.warning(f"建议使用其他目标列 '{other_col}'，其有效值比例为 {valid_ratio:.2%}")
+                
+                # 这里有两种选择：
+                # 1. 直接抛出异常中断流程
+                # 2. 返回空数据框让调用方处理
+                # 我们选择返回空数据框，以便调用方可以做出决策
+                return pd.DataFrame(columns=features_df.columns), pd.Series(dtype=float)
+            
+            # 如果目标列的NaN值过多但不是全部
+            elif nan_count_target > len(target_series) * 0.7:  # 如果超过70%是NaN
+                logger.warning(f"目标列 '{target_column}' 中超过70%的值为NaN，可能影响模型质量")
+            
+            # 处理目标中的NaN：对于时间序列，前向填充通常是合理的
+            logger.info("使用前向填充和后向填充处理目标中的NaN值")
+            target_series = target_series.fillna(method='ffill').fillna(method='bfill')
+            
+            # 检查是否还有NaN
+            remaining_nans = target_series.isna().sum()
+            if remaining_nans > 0:
+                # 如果还有NaN，使用均值填充
+                mean_val = target_series[~target_series.isna()].mean()
+                if pd.isna(mean_val):  # 如果均值也是NaN
+                    logger.warning("无法计算目标均值，使用0填充目标中的NaN值")
+                    target_series = target_series.fillna(0)
+                else:
+                    logger.info(f"使用均值 {mean_val:.4f} 填充目标中的NaN值")
+                    target_series = target_series.fillna(mean_val)
+        
+        # 更新填充后的统计信息
+        logger.info(f"NaN处理后的数据: 特征={features_df.shape}, 目标={target_series.shape}")
     
     logger.info(f"已加载数据: 特征={features_df.shape}, 目标={target_series.shape}")
     logger.info(f"时间范围: {features_df.index.min()} 到 {features_df.index.max()}")
