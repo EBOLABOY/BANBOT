@@ -344,50 +344,50 @@ def retrain_with_selected_features(
     verbose: bool = False
 ) -> str:
     """
-    使用选择的特征重新训练模型
+    Retrain model with selected features
     
     Args:
-        model_path: 原始模型路径
-        X_train: 训练特征
-        y_train: 训练目标
-        selected_features: 选择的特征列表
-        X_val: 验证特征(可选)
-        y_val: 验证目标(可选)
-        early_stopping_rounds: 早停轮数
-        output_dir: 输出目录
-        verbose: 是否打印详细日志
+        model_path: Path to original model
+        X_train: Training features
+        y_train: Training targets
+        selected_features: List of selected features
+        X_val: Validation features (optional)
+        y_val: Validation targets (optional)
+        early_stopping_rounds: Early stopping rounds
+        output_dir: Output directory
+        verbose: Whether to print detailed logs
         
     Returns:
-        str: 新模型保存路径
+        str: Path to saved new model
     """
-    logger.info(f"使用选择的 {len(selected_features)} 个特征重新训练模型")
+    logger.info(f"Retraining model with {len(selected_features)} selected features")
     
-    # 创建输出目录
+    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # 加载原始模型
+    # Load original model
     original_model = joblib.load(model_path)
     
-    # 提取模型参数(对于XGBoost模型)
+    # Extract model parameters (for XGBoost models)
     if isinstance(original_model, XGBRegressor):
-        # 获取模型参数
+        # Get model parameters
         params = original_model.get_params()
         
-        # 移除不需要的参数
+        # Remove unnecessary parameters
         remove_keys = ['base_score', 'callbacks', '_estimator_type', 'feature_names_in_', 'feature_types_in_']
         for key in remove_keys:
             if key in params:
                 del params[key]
         
-        # 创建新模型，将early_stopping_rounds移到这里
-        params['early_stopping_rounds'] = early_stopping_rounds # 添加早停参数
+        # Create new model, move early_stopping_rounds here
+        params['early_stopping_rounds'] = early_stopping_rounds # Add early stopping parameter
         model = XGBRegressor(**params)
         
-        # 筛选特征
+        # Filter features
         X_train_selected = X_train[selected_features]
         X_val_selected = X_val[selected_features] if X_val is not None else None
         
-        # 训练模型 - fit方法只接收eval_set
+        # Train model - fit method only accepts eval_set
         if X_val_selected is not None and y_val is not None:
             model.fit(
                 X_train_selected, y_train,
@@ -397,11 +397,11 @@ def retrain_with_selected_features(
         else:
             model.fit(X_train_selected, y_train)
     else:
-        # 对于其他类型的模型，暂时不支持
-        logger.warning(f"不支持的模型类型: {type(original_model)}，无法重新训练")
+        # For other model types, not supported yet
+        logger.warning(f"Unsupported model type: {type(original_model)}, cannot retrain")
         return ""
     
-    # 评估模型
+    # Evaluate model
     if X_val_selected is not None and y_val is not None:
         y_pred = model.predict(X_val_selected)
         mse = mean_squared_error(y_val, y_pred)
@@ -409,21 +409,21 @@ def retrain_with_selected_features(
         mae = mean_absolute_error(y_val, y_pred)
         r2 = r2_score(y_val, y_pred)
         
-        logger.info(f"模型评估指标:")
+        logger.info(f"Model evaluation metrics:")
         logger.info(f"  MSE: {mse:.6f}")
         logger.info(f"  RMSE: {rmse:.6f}")
         logger.info(f"  MAE: {mae:.6f}")
         logger.info(f"  R²: {r2:.6f}")
     
-    # 保存新模型
+    # Save new model
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     model_name = os.path.basename(model_path).split('.')[0]
     save_path = os.path.join(output_dir, f"{model_name}_selected_{len(selected_features)}_{timestamp}.joblib")
     
     joblib.dump(model, save_path)
-    logger.info(f"重新训练的模型已保存至: {save_path}")
+    logger.info(f"Retrained model saved to: {save_path}")
     
-    # 保存所用特征
+    # Save used features
     features_path = os.path.join(output_dir, f"{model_name}_selected_features_{timestamp}.json")
     with open(features_path, 'w') as f:
         json.dump({
@@ -433,49 +433,49 @@ def retrain_with_selected_features(
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }, f, indent=4)
     
-    logger.info(f"特征列表已保存至: {features_path}")
+    logger.info(f"Feature list saved to: {features_path}")
     
     return save_path
 
 
 def main():
     """
-    主函数，用于命令行调用
+    Main function for command line usage
     """
     import argparse
     
-    parser = argparse.ArgumentParser(description="特征选择工具")
+    parser = argparse.ArgumentParser(description="Feature Selection Tool")
     
-    # 基本参数
-    parser.add_argument("--model_path", type=str, required=True, help="模型路径")
-    parser.add_argument("--X_file", type=str, required=True, help="特征文件路径")
-    parser.add_argument("--y_file", type=str, required=True, help="目标文件路径")
+    # Basic parameters
+    parser.add_argument("--model_path", type=str, required=True, help="Path to model")
+    parser.add_argument("--X_file", type=str, required=True, help="Path to features file")
+    parser.add_argument("--y_file", type=str, required=True, help="Path to targets file")
     parser.add_argument("--method", type=str, default="importance", 
-                        choices=["importance", "shap"], help="特征选择方法")
-    parser.add_argument("--n_features", type=int, default=20, help="选择的特征数量")
+                        choices=["importance", "shap"], help="Feature selection method")
+    parser.add_argument("--n_features", type=int, default=20, help="Number of features to select")
     parser.add_argument("--output_dir", type=str, default="data/results/feature_selection", 
-                        help="输出目录")
-    parser.add_argument("--verbose", action="store_true", help="是否打印详细日志")
+                        help="Output directory")
+    parser.add_argument("--verbose", action="store_true", help="Whether to print detailed logs")
     
-    # 重新训练参数
-    parser.add_argument("--retrain", action="store_true", help="是否重新训练模型")
-    parser.add_argument("--X_val_file", type=str, help="验证特征文件路径")
-    parser.add_argument("--y_val_file", type=str, help="验证目标文件路径")
-    parser.add_argument("--early_stopping_rounds", type=int, default=50, help="早停轮数")
+    # Retraining parameters
+    parser.add_argument("--retrain", action="store_true", help="Whether to retrain the model")
+    parser.add_argument("--X_val_file", type=str, help="Path to validation features file")
+    parser.add_argument("--y_val_file", type=str, help="Path to validation targets file")
+    parser.add_argument("--early_stopping_rounds", type=int, default=50, help="Early stopping rounds")
     
     args = parser.parse_args()
     
-    # 加载数据
+    # Load data
     X = pd.read_csv(args.X_file, index_col=0)
     y = pd.read_csv(args.y_file, index_col=0).iloc[:, 0]
     
-    # 加载验证集(如果有)
+    # Load validation set (if available)
     X_val, y_val = None, None
     if args.retrain and args.X_val_file and args.y_val_file:
         X_val = pd.read_csv(args.X_val_file, index_col=0)
         y_val = pd.read_csv(args.y_val_file, index_col=0).iloc[:, 0]
     
-    # 创建特征选择器
+    # Create feature selector
     selector = FeatureSelector(
         model_path=args.model_path,
         method=args.method,
@@ -484,13 +484,13 @@ def main():
         verbose=args.verbose
     )
     
-    # 选择特征
+    # Select features
     selected_features = selector.select_features(X, y)
     
-    # 保存所选特征
+    # Save selected features
     selector.save_selected_features()
     
-    # 绘制特征重要性
+    # Plot feature importance
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     plot_path = os.path.join(
         args.output_dir, 
@@ -498,7 +498,7 @@ def main():
     )
     selector.plot_feature_importance(plot_path)
     
-    # 如果需要重新训练
+    # If retraining is needed
     if args.retrain:
         retrain_with_selected_features(
             model_path=args.model_path,
