@@ -93,8 +93,21 @@ class FeatureAnalyzer:
         targets_df = df[target_cols]
         
         # 特征数据 - 排除OHLCV基本列和目标列
-        exclude_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp'] + target_cols
+        basic_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
+        exclude_cols = basic_cols + target_cols
+        
+        # 确保有特征列被识别 - 如果所有列都在exclude_cols中，则使用所有数值列作为特征
         feature_cols = [col for col in df.columns if col not in exclude_cols]
+        if not feature_cols:
+            logger.warning("没有识别到特征列，将使用所有数值列（除了目标列）作为特征")
+            feature_cols = [col for col in df.select_dtypes(include=['number']).columns 
+                          if col not in target_cols and col not in ['timestamp']]
+            
+            # 如果仍然没有特征列，使用OHLCV列作为特征
+            if not feature_cols:
+                logger.warning("没有识别到数值特征列，将使用OHLCV基本列作为特征")
+                feature_cols = [col for col in basic_cols if col != 'timestamp' and col in df.columns]
+        
         features_df = df[feature_cols]
         
         logger.info(f"已加载 {symbol} 的 {timeframe} 数据，共 {len(df)} 条记录，{len(feature_cols)} 个特征和 {len(target_cols)} 个目标变量")
