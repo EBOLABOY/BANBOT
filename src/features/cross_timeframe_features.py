@@ -141,15 +141,18 @@ class CrossTimeframeFeatureIntegrator:
         # 为目标时间框架创建新的时间索引
         new_index = pd.date_range(start=start_time, end=end_time, freq=target_tf)
         
-        # 创建结果DataFrame
-        result = pd.DataFrame(index=new_index)
-        
-        # 前向填充特征值
+        # 优化：创建一个临时列表存储所有重采样的Series，而不是逐列添加到DataFrame
+        resampled_series = []
         for col in df.columns:
             # 将每个特征重采样到目标时间框架
-            resampled = df[col].reindex(result.index, method='ffill')
-            result[col] = resampled
+            resampled = df[col].reindex(new_index, method='ffill')
+            resampled_series.append(resampled)
             
+        # 使用pd.concat一次性创建DataFrame，避免碎片化
+        column_names = df.columns
+        result = pd.concat(resampled_series, axis=1)
+        result.columns = column_names
+        
         return result
     
     def _add_prefix_to_columns(self, 
