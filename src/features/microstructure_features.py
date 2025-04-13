@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import logging
+import warnings
 
 from src.utils.logger import get_logger
 
@@ -216,43 +217,51 @@ class MicrostructureFeatures:
         # 计算绝对回报率
         result_df['abs_returns'] = result_df['returns'].abs()
         
-        # 计算波动性聚集指标
-        for window in window_sizes:
-            # 计算窗口内的波动性自相关性
-            # 使用滚动窗口内波动性的自相关性作为代理
-            autocorrs = []
+        # 临时忽略numpy除法警告
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in divide')
             
-            for i in range(len(result_df) - window + 1):
-                if i < window:  # 对于前window个点
-                    autocorrs.append(np.nan)
-                    continue
+            # 计算波动性聚集指标
+            for window in window_sizes:
+                # 计算窗口内的波动性自相关性
+                # 使用滚动窗口内波动性的自相关性作为代理
+                autocorrs = []
                 
-                abs_returns = result_df['abs_returns'].iloc[i:i+window]
-                if len(abs_returns) <= 1 or abs_returns.isna().all():
-                    autocorrs.append(np.nan)
-                    continue
+                for i in range(len(result_df) - window + 1):
+                    if i < window:  # 对于前window个点
+                        autocorrs.append(np.nan)
+                        continue
+                    
+                    abs_returns = result_df['abs_returns'].iloc[i:i+window]
+                    if len(abs_returns) <= 1 or abs_returns.isna().all():
+                        autocorrs.append(np.nan)
+                        continue
+                    
+                    # 计算滞后1阶的自相关性
+                    if len(abs_returns) > 1:
+                        # 检查标准差是否为零
+                        if abs_returns.std() > 0:
+                            autocorr = abs_returns.autocorr(lag=1)
+                            autocorrs.append(autocorr)
+                        else:
+                            autocorrs.append(np.nan)
+                    else:
+                        autocorrs.append(np.nan)
                 
-                # 计算滞后1阶的自相关性
-                if len(abs_returns) > 1:
-                    autocorr = abs_returns.autocorr(lag=1)
-                    autocorrs.append(autocorr)
-                else:
-                    autocorrs.append(np.nan)
+                # 填充前window个值
+                autocorrs = [np.nan] * (len(result_df) - len(autocorrs)) + autocorrs
+                
+                # 添加特征
+                result_df[f'volatility_clustering_{window}'] = autocorrs
             
-            # 填充前window个值
-            autocorrs = [np.nan] * (len(result_df) - len(autocorrs)) + autocorrs
-            
-            # 添加特征
-            result_df[f'volatility_clustering_{window}'] = autocorrs
-        
-        # 计算ARCH效应
-        for window in window_sizes:
-            # 使用滚动窗口的ARCH效应
-            # ARCH效应测试基于Ljung-Box Q统计量
-            # 这里使用平方回报率的自相关性作为简化的代理
-            result_df[f'arch_effect_{window}'] = result_df['returns'].pow(2).rolling(window).apply(
-                lambda x: x.autocorr(lag=1) if len(x) > 1 else np.nan, raw=False
-            )
+            # 计算ARCH效应
+            for window in window_sizes:
+                # 使用滚动窗口的ARCH效应
+                # ARCH效应测试基于Ljung-Box Q统计量
+                # 这里使用平方回报率的自相关性作为简化的代理
+                result_df[f'arch_effect_{window}'] = result_df['returns'].pow(2).rolling(window).apply(
+                    lambda x: x.autocorr(lag=1) if len(x) > 1 and x.std() > 0 else np.nan, raw=False
+                )
         
         logger.info("已计算波动聚集特征")
         return result_df
