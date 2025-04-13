@@ -198,6 +198,28 @@ models:
       "adx_14",              # 趋势强度
       "mfi_14"               # 资金流向
     ]
+    
+    # 结合各优秀集合关键特征的优化特征集
+    combined_optimal_set: [
+      # 动量核心 (来自 price_momentum & comprehensive)
+      "macd",
+      "macd_signal",
+      "ema_20_50_ratio",
+      "rsi_14",
+      # 趋势核心 (来自 comprehensive & ichimoku)
+      "price_rel_sma_50",
+      "adx_14",
+      "ichimoku_b",
+      "ichimoku_base",
+      # 交易量代表 (来自 volume & comprehensive)
+      "vwap",
+      "pvt",
+      "price_impact_coef_200", # 在volume set中重要性极高
+      # 波动率代表 (来自 comprehensive & volatility)
+      "atr_14",
+      # 基础价格 (多个集合中重要)
+      "close"
+    ]
   
   # 模型类型
   model_types:
