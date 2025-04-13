@@ -140,11 +140,25 @@ def main():
                 timeframes = ["1h", "4h", "1d"]  # 默认跨周期组合
                 
                 for feature in selected_features:
+                    # 检查特征是否已经有时间框架前缀
+                    already_prefixed = False
                     for tf in timeframes:
-                        prefixed_feature = f"{tf}_{feature}"
-                        # 检查特征是否存在
-                        if prefixed_feature in X.columns:
-                            prefixed_features.append(prefixed_feature)
+                        if feature.startswith(f"{tf}_"):
+                            already_prefixed = True
+                            break
+                    
+                    if already_prefixed:
+                        # 如果已经有前缀，直接添加
+                        prefixed_features.append(feature)
+                        logger.debug(f"特征 '{feature}' 已有时间框架前缀")
+                    else:
+                        # 否则添加前缀
+                        for tf in timeframes:
+                            prefixed_feature = f"{tf}_{feature}"
+                            # 检查特征是否存在
+                            if prefixed_feature in X.columns:
+                                prefixed_features.append(prefixed_feature)
+                                logger.debug(f"为特征 '{feature}' 添加前缀: '{prefixed_feature}'")
                 
                 selected_features = prefixed_features
                 logger.info(f"跨周期特征前缀处理后: {selected_features}")
