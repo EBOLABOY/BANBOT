@@ -239,8 +239,8 @@ class XGBoostOptimizer:
         
         # 使用最佳参数训练模型
         logger.info("使用最佳参数训练模型...")
-        # 调用 train 方法
-        model = model.train(X_train, y_train, validation_data=(X_val, y_val))
+        # 调用 train 方法，但不要覆盖model变量
+        train_metrics = model.train(X_train, y_train, validation_data=(X_val, y_val))
         
         # 评估模型
         train_score = model.score(X_train, y_train)
