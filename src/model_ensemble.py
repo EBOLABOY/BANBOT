@@ -362,30 +362,30 @@ class ModelEnsemble:
         selected_features: Optional[Dict[str, List[str]]] = None
     ):
         """
-        初始化模型集成
+        初始化模型集成器
         
         Args:
-            model_paths: 模型路径列表
-            ensemble_method: 集成方法，'average', 'weighted', 'stacking'
-            weights: 权重列表(用于weighted方法)
-            model_names: 模型名称列表(可选)
-            selected_features: 每个模型使用的特征列表(如果不同)
+            model_paths: 模型文件路径列表
+            ensemble_method: 集成方法，支持'average', 'weighted'
+            weights: 模型权重列表，用于'weighted'方法
+            model_names: 模型名称列表，如果为None则使用默认名称
+            selected_features: 每个模型的特征列表，键为模型名称
         """
         self.model_paths = model_paths
         self.ensemble_method = ensemble_method
-        self.weights = weights
-        self.model_names = model_names or [f"model_{i}" for i in range(len(model_paths))]
-        self.selected_features = selected_features or {}
-        
-        # 加载所有模型
         self.models = self._load_models()
+        self.model_names = model_names if model_names else [f"model_{i}" for i in range(len(self.models))]
+        self.selected_features = selected_features
+        self.logger = logging.getLogger(__name__)
         
-        # 验证权重
-        if ensemble_method == 'weighted' and weights is None:
+        # 设置模型权重
+        if weights:
+            if len(weights) != len(self.models):
+                raise ValueError(f"权重数量({len(weights)})与模型数量({len(self.models)})不匹配")
+            self.weights = weights
+        else:
             # 默认平均权重
-            self.weights = [1.0 / len(model_paths)] * len(model_paths)
-        elif ensemble_method == 'weighted' and len(weights) != len(model_paths):
-            raise ValueError(f"权重数量 ({len(weights)}) 必须与模型数量 ({len(model_paths)}) 相同")
+            self.weights = [1.0 / len(self.models)] * len(self.models)
     
     def _load_models(self) -> List[BaseEstimator]:
         """
@@ -521,7 +521,7 @@ class ModelEnsemble:
             smoother: 平滑器实例 (可选)
             show_individual: 是否显示单个模型的预测 (可选)
         """
-        logger.info(f"Generating prediction plot: {title}")
+        self.logger.info(f"Generating prediction plot: {title}")
 
         # 获取集成预测
         ensemble_pred = self.predict(X, apply_smoothing=apply_smoothing, smoother=smoother)
@@ -566,7 +566,7 @@ class ModelEnsemble:
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"Prediction plot saved to: {save_path}")
+            self.logger.info(f"Prediction plot saved to: {save_path}")
 
         plt.close()
     
