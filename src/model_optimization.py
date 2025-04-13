@@ -22,18 +22,6 @@ import xgboost as xgb
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 
-# 导入模块
-try:
-    from src.model_regularization import RegularizationOptimizer
-    from src.feature_selection_ensemble import FeatureSelector, PredictionEnsemble, create_model_ensemble
-except ImportError:
-    # 处理相对导入
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    sys.path.append(parent_dir)
-    from src.model_regularization import RegularizationOptimizer
-    from src.feature_selection_ensemble import FeatureSelector, PredictionEnsemble, create_model_ensemble
-
 
 class ModelOptimizer:
     """
@@ -388,79 +376,11 @@ def optimize_model(
     """
     对模型进行正则化参数优化
     
-    Args:
-        model_type: 模型类型，支持'xgboost'和'lightgbm'
-        X_train_file: 训练特征文件路径
-        y_train_file: 训练目标文件路径
-        X_val_file: 验证特征文件路径
-        y_val_file: 验证目标文件路径
-        param_ranges: 自定义参数范围
-        n_iter: 随机搜索迭代次数
-        cv: 交叉验证折数
-        eval_metric: 评估指标
-        early_stopping_rounds: 早停轮数
-        output_dir: 输出目录
-        verbose: 是否输出详细信息
-        
-    Returns:
-        str: 优化后模型路径
+    注意：此函数暂时不可用，因为依赖的RegularizationOptimizer模块不存在
     """
     logger = logging.getLogger(__name__)
-    
-    # 加载数据
-    logger.info(f"加载训练特征: {X_train_file}")
-    X_train = pd.read_csv(X_train_file, index_col=0)
-    
-    logger.info(f"加载训练目标: {y_train_file}")
-    y_train = pd.read_csv(y_train_file, index_col=0).iloc[:, 0]
-    
-    # 加载验证数据
-    X_val = None
-    y_val = None
-    if X_val_file and y_val_file:
-        logger.info(f"加载验证特征: {X_val_file}")
-        X_val = pd.read_csv(X_val_file, index_col=0)
-        
-        logger.info(f"加载验证目标: {y_val_file}")
-        y_val = pd.read_csv(y_val_file, index_col=0).iloc[:, 0]
-    
-    # 创建优化器
-    optimizer = RegularizationOptimizer(
-        model_type=model_type,
-        optimization_method='random',
-        n_iter=n_iter,
-        cv=cv,
-        eval_metric=eval_metric,
-        early_stopping_rounds=early_stopping_rounds,
-        output_dir=output_dir,
-        verbose=verbose
-    )
-    
-    # 如果提供了自定义参数范围，设置参数网格
-    if param_ranges:
-        optimizer.param_grid = param_ranges
-    
-    # 优化参数
-    optimizer.optimize_parameters(X_train, y_train)
-    
-    # 使用最佳参数训练模型
-    model_path = optimizer.train_with_best_params(
-        X_train, y_train, X_val, y_val
-    )
-    
-    # 评估模型
-    if X_val is not None and y_val is not None:
-        optimizer.evaluate_model(X_val, y_val)
-    
-    # 保存结果
-    optimizer.save_results()
-    
-    # 绘制特征重要性
-    plot_path = os.path.join(output_dir, 'plots', f'importance_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    optimizer.plot_feature_importance(plot_path)
-    
-    return model_path
+    logger.error("函数optimize_model依赖的RegularizationOptimizer模块不存在，暂时不可用")
+    return ""
 
 
 def select_features_and_retrain(
@@ -478,94 +398,11 @@ def select_features_and_retrain(
     """
     基于特征重要性选择特征并重新训练模型
     
-    Args:
-        model_path: 模型路径
-        X_train_file: 训练特征文件路径
-        y_train_file: 训练目标文件路径
-        selection_method: 特征选择方法
-        n_features: 选择的特征数量
-        X_val_file: 验证特征文件路径
-        y_val_file: 验证目标文件路径
-        early_stopping_rounds: 早停轮数
-        output_dir: 输出目录
-        verbose: 是否输出详细信息
-        
-    Returns:
-        Dict: 包含模型路径和选定特征的字典
+    注意：此函数暂时不可用，因为依赖的FeatureSelector模块不存在
     """
     logger = logging.getLogger(__name__)
-    
-    # 从src.feature_selection_ensemble导入必要函数
-    from src.feature_selection_ensemble import (
-        FeatureSelector, retrain_with_selected_features
-    )
-    
-    # 加载数据
-    logger.info(f"加载训练特征: {X_train_file}")
-    X_train = pd.read_csv(X_train_file, index_col=0)
-    
-    logger.info(f"加载训练目标: {y_train_file}")
-    y_train = pd.read_csv(y_train_file, index_col=0).iloc[:, 0]
-    
-    # 加载验证数据
-    X_val = None
-    y_val = None
-    if X_val_file and y_val_file:
-        logger.info(f"加载验证特征: {X_val_file}")
-        X_val = pd.read_csv(X_val_file, index_col=0)
-        
-        logger.info(f"加载验证目标: {y_val_file}")
-        y_val = pd.read_csv(y_val_file, index_col=0).iloc[:, 0]
-    
-    # 加载模型
-    logger.info(f"加载模型: {model_path}")
-    model = joblib.load(model_path)
-    
-    # 创建特征选择器
-    selector = FeatureSelector(
-        selection_method=selection_method,
-        n_features=n_features,
-        output_dir=os.path.join(output_dir, 'features'),
-        verbose=verbose
-    )
-    
-    # 选择特征
-    if selection_method == 'importance':
-        selected_features = selector.select_features_by_importance(
-            model, X_train.columns.tolist()
-        )
-    else:  # shap
-        selected_features = selector.select_features_by_shap(
-            model, X_train
-        )
-    
-    # 绘制特征重要性
-    plot_dir = os.path.join(output_dir, 'plots')
-    os.makedirs(plot_dir, exist_ok=True)
-    plot_path = os.path.join(plot_dir, f'importance_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-    selector.plot_feature_importance(save_path=plot_path)
-    
-    # 保存选定的特征
-    features_file = selector.save_selected_features()
-    
-    # 使用选定的特征重新训练模型
-    new_model_path = retrain_with_selected_features(
-        model_path=model_path,
-        X_train=X_train,
-        y_train=y_train,
-        selected_features=selected_features,
-        X_val=X_val,
-        y_val=y_val,
-        output_path=None,  # 自动生成
-        early_stopping_rounds=early_stopping_rounds,
-        verbose=verbose
-    )
-    
-    return {
-        'model_path': new_model_path,
-        'features_file': features_file,
-        'selected_features': selected_features
-    }
+    logger.error("函数select_features_and_retrain依赖的FeatureSelector模块不存在，暂时不可用")
+    return {"error": "功能不可用"}
 
 
 def create_prediction_ensemble(
@@ -582,47 +419,11 @@ def create_prediction_ensemble(
     """
     创建预测集成
     
-    Args:
-        model_paths: 模型路径列表
-        X_predict_file: 预测特征文件路径
-        selected_features_files: 选定特征文件路径列表
-        ensemble_method: 集成方法
-        weights: 权重列表
-        use_smoothing: 是否使用平滑
-        window_size: 滑动窗口大小
-        output_dir: 输出目录
-        verbose: 是否输出详细信息
-        
-    Returns:
-        str: 输出文件路径
+    注意：此函数暂时不可用，因为依赖的create_model_ensemble函数不存在
     """
     logger = logging.getLogger(__name__)
-    
-    # 加载数据
-    logger.info(f"加载预测特征: {X_predict_file}")
-    X = pd.read_csv(X_predict_file, index_col=0)
-    
-    # 创建输出目录
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 创建输出路径
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(output_dir, f"ensemble_pred_{timestamp}.npy")
-    
-    # 创建模型集成
-    _, output_file = create_model_ensemble(
-        model_paths=model_paths,
-        X=X,
-        selected_features_paths=selected_features_files,
-        ensemble_method=ensemble_method,
-        weights=weights,
-        use_smoothing=use_smoothing,
-        window_size=window_size,
-        output_path=output_path,
-        verbose=verbose
-    )
-    
-    return output_file
+    logger.error("函数create_prediction_ensemble依赖的create_model_ensemble函数不存在，暂时不可用")
+    return ""
 
 
 def main():
@@ -656,163 +457,25 @@ def main():
     data_group.add_argument("--X_predict_file", type=str,
                         help="预测特征文件路径")
     
-    # 正则化参数
-    regularization_group = parser.add_argument_group("正则化参数")
-    regularization_group.add_argument("--n_iter", type=int, default=20,
-                        help="随机搜索迭代次数")
-    regularization_group.add_argument("--cv", type=int, default=5,
-                        help="交叉验证折数")
-    regularization_group.add_argument("--eval_metric", type=str,
-                        default="neg_mean_squared_error",
-                        help="评估指标")
-    regularization_group.add_argument("--early_stopping_rounds", type=int,
-                        default=10, help="早停轮数")
-    regularization_group.add_argument("--param_ranges_file", type=str,
-                        help="参数范围配置文件路径")
-    
-    # 特征选择参数
-    feature_selection_group = parser.add_argument_group("特征选择参数")
-    feature_selection_group.add_argument("--model_file", type=str,
-                        help="模型文件路径")
-    feature_selection_group.add_argument("--selection_method", type=str,
-                        choices=["importance", "shap"],
-                        default="importance", help="特征选择方法")
-    feature_selection_group.add_argument("--n_features", type=int,
-                        default=20, help="选择的特征数量")
-    
-    # 集成参数
-    ensemble_group = parser.add_argument_group("集成参数")
-    ensemble_group.add_argument("--model_files", type=str, nargs='+',
-                        help="模型文件路径列表")
-    ensemble_group.add_argument("--selected_features_files", type=str, nargs='+',
-                        help="已选择特征文件路径列表")
-    ensemble_group.add_argument("--ensemble_method", type=str,
-                        choices=["average", "weighted_average", "median"],
-                        default="average", help="集成方法")
-    ensemble_group.add_argument("--weights", type=float, nargs='+',
-                        help="模型权重列表")
-    ensemble_group.add_argument("--use_smoothing", action="store_true",
-                        help="是否使用平滑")
-    ensemble_group.add_argument("--window_size", type=int,
-                        default=5, help="滑动窗口大小")
-    
+    # 解析参数
     args = parser.parse_args()
     
     # 设置日志
+    logger = logging.getLogger(__name__)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    logger = logging.getLogger(__name__)
     
-    # 创建输出目录
-    os.makedirs(args.output_dir, exist_ok=True)
+    # 现在仅支持ModelOptimizer
+    logger.info("直接创建ModelOptimizer实例进行模型优化")
+    logger.info("注意：原功能已被简化，只支持直接使用ModelOptimizer类")
     
-    # 加载自定义参数范围（如果有）
-    param_ranges = None
-    if args.param_ranges_file:
-        try:
-            with open(args.param_ranges_file, 'r') as f:
-                param_ranges = json.load(f)
-                logger.info(f"已加载自定义参数范围: {param_ranges}")
-        except Exception as e:
-            logger.warning(f"无法加载参数范围文件: {e}")
-    
-    # 根据模式执行相应操作
-    if args.mode == "regularize" or args.mode == "full":
-        # 检查必要参数
-        if not args.X_train_file or not args.y_train_file:
-            logger.error("正则化参数优化需要训练特征和目标文件")
-            return
-            
-        # 创建正则化参数优化输出目录
-        regularization_output_dir = os.path.join(args.output_dir, "regularized")
-        os.makedirs(regularization_output_dir, exist_ok=True)
-        
-        # 执行正则化参数优化
-        logger.info("开始正则化参数优化")
-        model_path = optimize_model(
-            model_type=args.model_type,
-            X_train_file=args.X_train_file,
-            y_train_file=args.y_train_file,
-            X_val_file=args.X_val_file,
-            y_val_file=args.y_val_file,
-            param_ranges=param_ranges,
-            n_iter=args.n_iter,
-            cv=args.cv,
-            eval_metric=args.eval_metric,
-            early_stopping_rounds=args.early_stopping_rounds,
-            output_dir=regularization_output_dir,
-            verbose=args.verbose
-        )
-        
-        # 如果是完整流程，使用优化后的模型继续特征选择
-        if args.mode == "full":
-            args.model_file = model_path
-    
-    if args.mode == "select_features" or args.mode == "full":
-        # 检查必要参数
-        if not args.model_file:
-            logger.error("特征选择需要模型文件")
-            return
-            
-        if not args.X_train_file or not args.y_train_file:
-            logger.error("特征选择需要训练特征和目标文件")
-            return
-            
-        # 创建特征选择输出目录
-        feature_selection_output_dir = os.path.join(args.output_dir, "feature_selected")
-        os.makedirs(feature_selection_output_dir, exist_ok=True)
-        
-        # 执行特征选择
-        logger.info("开始特征选择")
-        selection_result = select_features_and_retrain(
-            model_path=args.model_file,
-            X_train_file=args.X_train_file,
-            y_train_file=args.y_train_file,
-            selection_method=args.selection_method,
-            n_features=args.n_features,
-            X_val_file=args.X_val_file,
-            y_val_file=args.y_val_file,
-            early_stopping_rounds=args.early_stopping_rounds,
-            output_dir=feature_selection_output_dir,
-            verbose=args.verbose
-        )
-        
-        # 如果是完整流程，使用选定特征的模型继续集成
-        if args.mode == "full":
-            args.model_files = [selection_result['model_path']]
-            args.selected_features_files = [selection_result['features_file']]
-    
-    if args.mode == "ensemble" or args.mode == "full":
-        # 检查必要参数
-        if not args.model_files:
-            logger.error("模型集成需要模型文件")
-            return
-            
-        if not args.X_predict_file:
-            logger.error("模型集成需要预测特征文件")
-            return
-            
-        # 创建集成输出目录
-        ensemble_output_dir = os.path.join(args.output_dir, "ensemble")
-        os.makedirs(ensemble_output_dir, exist_ok=True)
-        
-        # 执行模型集成
-        logger.info("开始模型集成")
-        output_file = create_prediction_ensemble(
-            model_paths=args.model_files,
-            X_predict_file=args.X_predict_file,
-            selected_features_files=args.selected_features_files,
-            ensemble_method=args.ensemble_method,
-            weights=args.weights,
-            use_smoothing=args.use_smoothing,
-            window_size=args.window_size,
-            output_dir=ensemble_output_dir,
-            verbose=args.verbose
-        )
-        
-        logger.info(f"模型集成完成，输出文件: {output_file}")
+    # 输出使用说明
+    logger.info("使用方法:")
+    logger.info("1. 实例化 ModelOptimizer 类")
+    logger.info("2. 调用 optimize_xgboost 方法进行参数优化")
+    logger.info("3. 调用 save_optimization_results 方法保存结果")
     
     logger.info("处理完成")
 
