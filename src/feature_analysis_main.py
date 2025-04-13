@@ -61,29 +61,43 @@ class FeatureAnalyzer:
         返回:
             特征数据和目标变量
         """
-        # 构建文件路径
-        feature_path = os.path.join(self.feature_dir, f"{symbol}_{timeframe}_features.csv")
-        target_path = os.path.join(self.feature_dir, f"{symbol}_{timeframe}_targets.csv")
+        # 构建文件路径 - 从processed目录加载数据
+        data_path = os.path.join("data/processed", f"processed_{symbol}_{timeframe}_20220101.csv")
         
         # 检查文件是否存在
-        if not os.path.exists(feature_path) or not os.path.exists(target_path):
-            logger.error(f"特征文件不存在: {feature_path} 或 {target_path}")
+        if not os.path.exists(data_path):
+            logger.error(f"数据文件不存在: {data_path}")
             return None, None
         
         # 加载数据
-        features_df = pd.read_csv(feature_path, index_col=0, parse_dates=True)
-        targets_df = pd.read_csv(target_path, index_col=0, parse_dates=True)
+        df = pd.read_csv(data_path, index_col=0, parse_dates=True)
         
         # 筛选日期范围
         if start_date:
-            features_df = features_df[features_df.index >= pd.to_datetime(start_date)]
-            targets_df = targets_df[targets_df.index >= pd.to_datetime(start_date)]
+            df = df[df.index >= pd.to_datetime(start_date)]
         
         if end_date:
-            features_df = features_df[features_df.index <= pd.to_datetime(end_date)]
-            targets_df = targets_df[targets_df.index <= pd.to_datetime(end_date)]
+            df = df[df.index <= pd.to_datetime(end_date)]
         
-        logger.info(f"已加载 {symbol} 的 {timeframe} 特征数据，共 {len(features_df)} 条记录和 {len(features_df.columns)} 个特征")
+        # 分离特征和目标变量
+        # 假设所有'price_change_'开头的列都是目标变量
+        target_cols = [col for col in df.columns if col.startswith('price_change_')]
+        if not target_cols:
+            # 如果没有目标变量列，为后续分析创建一些基本的目标变量
+            df['price_change_1h'] = df['close'].pct_change(periods=1)
+            df['price_change_4h'] = df['close'].pct_change(periods=4)
+            df['price_change_1d'] = df['close'].pct_change(periods=24)
+            target_cols = ['price_change_1h', 'price_change_4h', 'price_change_1d']
+            
+        # 分离特征和目标
+        targets_df = df[target_cols]
+        
+        # 特征数据 - 排除OHLCV基本列和目标列
+        exclude_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp'] + target_cols
+        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        features_df = df[feature_cols]
+        
+        logger.info(f"已加载 {symbol} 的 {timeframe} 数据，共 {len(df)} 条记录，{len(feature_cols)} 个特征和 {len(target_cols)} 个目标变量")
         return features_df, targets_df
     
     def calculate_feature_importance(self, features_df, targets_df, target_col='price_change_1h', 
