@@ -7,6 +7,7 @@ import sys
 import os
 import traceback
 from datetime import datetime, timedelta
+import glob
 
 from src.utils.logger import setup_logging, get_logger
 from src.utils.config import load_config
@@ -41,7 +42,55 @@ def parse_args():
     parser.add_argument("--timeframe", type=str,
                         help="指定时间框架（例如：1h, 4h, 1d）")
     
+    parser.add_argument("--force_collect", action="store_true",
+                        help="强制重新收集数据，即使本地已有数据")
+    
     return parser.parse_args()
+
+def check_data_exists(symbol, timeframe, date_suffix, raw_data_dir="data/raw"):
+    """
+    检查指定的数据文件是否已存在
+    
+    参数:
+        symbol: 交易对名称
+        timeframe: 时间框架
+        date_suffix: 日期后缀，如20220101
+        raw_data_dir: 原始数据存储目录
+        
+    返回:
+        bool: 如果文件存在返回True，否则返回False
+    """
+    file_pattern = f"{raw_data_dir}/{symbol}_{timeframe}_{date_suffix}.csv"
+    return len(glob.glob(file_pattern)) > 0
+
+def get_required_data_files(config, start_date=None, end_date=None, symbol=None, timeframe=None):
+    """
+    获取需要收集的数据文件列表
+    
+    参数:
+        config: 配置信息
+        start_date: 开始日期
+        end_date: 结束日期
+        symbol: 指定交易对
+        timeframe: 指定时间框架
+        
+    返回:
+        list: 包含(symbol, timeframe)元组的列表
+    """
+    # 读取配置文件中的交易对和时间框架
+    if not config:
+        return []
+        
+    symbols = [symbol] if symbol else config.get("data", {}).get("symbols", [])
+    timeframes = [timeframe] if timeframe else config.get("data", {}).get("timeframes", [])
+    
+    # 生成需要的文件列表
+    required_files = []
+    for sym in symbols:
+        for tf in timeframes:
+            required_files.append((sym, tf))
+    
+    return required_files
 
 def main():
     """主函数"""
@@ -57,26 +106,57 @@ def main():
         
         # 创建数据管理器
         data_manager = DataManager(args.config)
+        config = load_config(args.config)
+        
+        # 确定日期后缀
+        date_suffix = "20220101"  # 默认日期后缀，根据您的实际需求调整
+        if args.start_date:
+            start_date = datetime.strptime(args.start_date, "%Y-%m-%d")
+            date_suffix = start_date.strftime("%Y%m%d")
         
         # 根据运行模式执行相应操作
         if args.mode in ["collect", "all"]:
             logger.info("开始收集数据...")
-            if args.symbol:
-                # 收集指定交易对的数据
-                symbols = [args.symbol]
-                success = data_manager.collector.collect_historical_data(
-                    parallel=args.parallel,
-                    max_workers=args.max_workers
-                )
-                logger.info(f"数据收集{'成功' if success else '失败'}")
+            
+            # 获取需要收集的数据文件列表
+            required_files = get_required_data_files(
+                config, args.start_date, args.end_date, args.symbol, args.timeframe
+            )
+            
+            # 检查哪些文件已存在，哪些需要收集
+            files_to_collect = []
+            skipped_files = []
+            
+            for symbol, timeframe in required_files:
+                if args.force_collect or not check_data_exists(symbol, timeframe, date_suffix):
+                    files_to_collect.append((symbol, timeframe))
+                else:
+                    skipped_files.append((symbol, timeframe))
+            
+            if skipped_files:
+                logger.info(f"跳过已存在的 {len(skipped_files)} 个数据文件: {skipped_files}")
+            
+            # 如果有需要收集的文件，则进行收集
+            if files_to_collect:
+                logger.info(f"开始收集 {len(files_to_collect)} 个数据文件")
+                
+                if args.symbol:
+                    # 收集指定交易对的数据
+                    success = data_manager.collector.collect_historical_data(
+                        parallel=args.parallel,
+                        max_workers=args.max_workers
+                    )
+                    logger.info(f"数据收集{'成功' if success else '失败'}")
+                else:
+                    # 收集所有目标货币的数据
+                    success = data_manager.collect_and_process_data(
+                        start_date=args.start_date,
+                        end_date=args.end_date,
+                        parallel=args.parallel
+                    )
+                    logger.info(f"数据收集{'成功' if success else '失败'}")
             else:
-                # 收集所有目标货币的数据
-                success = data_manager.collect_and_process_data(
-                    start_date=args.start_date,
-                    end_date=args.end_date,
-                    parallel=args.parallel
-                )
-                logger.info(f"数据收集{'成功' if success else '失败'}")
+                logger.info("所有需要的数据文件已存在，无需重新收集")
         
         if args.mode in ["process", "all"]:
             logger.info("开始处理数据...")
