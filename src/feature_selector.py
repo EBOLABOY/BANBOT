@@ -403,7 +403,7 @@ def retrain_with_selected_features(
             model.fit(
                 X_train_selected, y_train,
                 eval_set=[(X_val_selected, y_val)],
-                callbacks=[early_stopping],
+                callback=[early_stopping],
                 verbose=verbose
             )
         else:

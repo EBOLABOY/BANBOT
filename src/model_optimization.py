@@ -212,7 +212,7 @@ class ModelOptimizer:
         search.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callbacks=[early_stopping],
+            callback=[early_stopping],
             verbose=False
         )
         
@@ -236,7 +236,7 @@ class ModelOptimizer:
         best_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callbacks=[early_stopping],
+            callback=[early_stopping],
             verbose=False
         )
         
