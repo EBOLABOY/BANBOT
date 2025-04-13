@@ -196,9 +196,9 @@ class FeatureSelector:
                 if feature in self.selected_features:
                     bars[i].set_color('orange')
                     
-        plt.xlabel('重要性')
-        plt.ylabel('特征')
-        plt.title('特征重要性')
+        plt.xlabel('Importance')
+        plt.ylabel('Feature')
+        plt.title('Feature Importance')
         plt.tight_layout()
         
         # 保存图表
@@ -309,42 +309,42 @@ class PredictionSmoother:
         original: pd.Series,
         smoothed: pd.Series,
         targets: Optional[pd.Series] = None,
-        title: str = '原始预测与平滑预测对比',
+        title: str = 'Original vs Smoothed Predictions',
         save_path: Optional[str] = None
     ) -> None:
         """
-        绘制原始预测与平滑预测的对比图
-        
+        绘制原始预测、平滑预测和目标值的对比图
+
         Args:
-            original: 原始预测结果
-            smoothed: 平滑后的预测结果
-            targets: 实际目标值(可选)
+            original: 原始预测序列
+            smoothed: 平滑后的预测序列
+            targets: 目标值序列 (可选)
             title: 图表标题
-            save_path: 保存路径(可选)
+            save_path: 保存路径 (可选)
         """
         plt.figure(figsize=(12, 6))
-        
+
         # 绘制原始预测
-        plt.plot(original.index, original.values, 'b-', alpha=0.6, label='原始预测')
-        
+        plt.plot(original.index, original.values, label='Original Predictions', alpha=0.7)
+
         # 绘制平滑预测
-        plt.plot(smoothed.index, smoothed.values, 'r-', linewidth=2, label='平滑预测')
-        
-        # 如果提供了目标值，也绘制它们
+        plt.plot(smoothed.index, smoothed.values, label='Smoothed Predictions', linewidth=2)
+
+        # 绘制目标值
         if targets is not None:
-            plt.plot(targets.index, targets.values, 'g-', alpha=0.6, label='实际值')
-        
-        plt.title(f'{title} (窗口大小: {self.window_size}, 方法: {self.method})')
-        plt.xlabel('日期')
-        plt.ylabel('预测值')
+            plt.plot(targets.index, targets.values, label='Actual Values', alpha=0.5, linestyle=':')
+
+        plt.title(title)
+        plt.xlabel('Date')
+        plt.ylabel('Value')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
+
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"对比图已保存至: {save_path}")
-        
+            print(f"Comparison plot saved to: {save_path}")
+
         plt.close()
 
 
@@ -503,70 +503,71 @@ class ModelEnsemble:
         self,
         X: pd.DataFrame,
         y: pd.Series,
-        title: str = '集成模型预测对比',
+        title: str = 'Ensemble Model Predictions Comparison',
         save_path: Optional[str] = None,
         apply_smoothing: bool = False,
         smoother: Optional[PredictionSmoother] = None,
         show_individual: bool = True
     ) -> None:
         """
-        绘制预测结果
-        
+        绘制集成模型的预测结果与实际值的对比图
+
         Args:
-            X: 输入特征
-            y: 目标变量
+            X: 特征数据
+            y: 实际目标值
             title: 图表标题
-            save_path: 保存路径
-            apply_smoothing: 是否应用平滑处理
-            smoother: 平滑处理器实例(如果apply_smoothing为True)
-            show_individual: 是否显示单个模型的预测
+            save_path: 保存路径 (可选)
+            apply_smoothing: 是否应用平滑 (可选)
+            smoother: 平滑器实例 (可选)
+            show_individual: 是否显示单个模型的预测 (可选)
         """
-        plt.figure(figsize=(12, 6))
-        
-        # 绘制实际值
-        plt.plot(y.index, y.values, 'g-', alpha=0.6, label='实际值')
-        
+        logger.info(f"Generating prediction plot: {title}")
+
         # 获取集成预测
-        ensemble_pred = self.predict(X, apply_smoothing, smoother)
-        
-        # 绘制集成预测
-        ensemble_label = f'集成预测 ({self.ensemble_method})'
-        if apply_smoothing and smoother:
-            ensemble_label += f' + 平滑 ({smoother.method})'
-        
-        plt.plot(ensemble_pred.index, ensemble_pred.values, 'r-', linewidth=2, label=ensemble_label)
-        
-        # 显示单个模型的预测
+        ensemble_pred = self.predict(X, apply_smoothing=apply_smoothing, smoother=smoother)
+
+        plt.figure(figsize=(15, 7))
+
+        # Plot actual values
+        plt.plot(y.index, y.values, label='Actual Values', alpha=0.7, linewidth=1.5)
+
+        # Plot ensemble prediction
+        label_suffix = " (Smoothed)" if apply_smoothing and smoother else ""
+        plt.plot(ensemble_pred.index, ensemble_pred.values, label=f'Ensemble Prediction{label_suffix}', linewidth=2, color='blue')
+
+        # Plot individual model predictions if requested
         if show_individual:
             for i, model in enumerate(self.models):
-                # 检查是否需要为此模型选择特定特征
-                if self.model_names[i] in self.selected_features:
-                    features = self.selected_features[self.model_names[i]]
-                    X_model = X[features]
-                else:
-                    X_model = X
-                
-                # 进行预测
+                # Check if specific features are needed for this model
+                X_model = X
+                model_key = self.model_names[i] if self.model_names else f"model_{i}"
+                if self.selected_features and model_key in self.selected_features:
+                    X_model = X[self.selected_features[model_key]]
+                elif self.selected_features and 'default' in self.selected_features: # Fallback? Maybe not needed
+                     X_model = X[self.selected_features['default']]
+
+
                 pred = model.predict(X_model)
-                
+
                 if isinstance(pred, np.ndarray) and pred.ndim == 1:
                     pred_series = pd.Series(pred, index=X.index)
                 else:
                     pred_series = pd.Series(pred.flatten(), index=X.index)
-                
-                plt.plot(pred_series.index, pred_series.values, '--', alpha=0.4, label=f'模型 {self.model_names[i]}')
-        
+
+                model_display_name = self.model_names[i] if self.model_names else f"Model {i}"
+                plt.plot(pred_series.index, pred_series.values, '--', alpha=0.4, label=f'{model_display_name} Prediction')
+
         plt.title(title)
-        plt.xlabel('日期')
-        plt.ylabel('预测值')
+        plt.xlabel('Date')
+        plt.ylabel('Predicted Value')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
+
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"预测图已保存至: {save_path}")
-        
+            logger.info(f"Prediction plot saved to: {save_path}")
+
         plt.close()
     
     def save_weights(self, save_path: str) -> None:
@@ -935,9 +936,9 @@ def main():
             plt.figure(figsize=(12, 8))
             top_features = importance.head(20)
             plt.barh(top_features['feature'], top_features['importance'])
-            plt.xlabel('重要性')
-            plt.ylabel('特征')
-            plt.title('集成模型特征重要性')
+            plt.xlabel('Importance')
+            plt.ylabel('Feature')
+            plt.title('Ensemble Model Feature Importance')
             plt.tight_layout()
             
             plot_file = os.path.join(args.output_dir, "ensemble_importance.png")
@@ -986,7 +987,7 @@ def main():
             original=pd.Series(predictions),
             smoothed=smoothed,
             targets=None,
-            title=f'预测平滑结果 (窗口大小: {args.window_size}, 方法: {args.ensemble_method})',
+            title=f'Original vs Smoothed Predictions (Window Size: {args.window_size}, Method: {args.ensemble_method})',
             save_path=os.path.join(args.output_dir, "prediction_smoothing.png")
         )
     
