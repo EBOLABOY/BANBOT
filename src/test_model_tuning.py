@@ -217,7 +217,7 @@ def test_feature_selection(model_path, X_train, y_train, X_val, y_val):
     return new_model_path, selected_features
 
 
-def test_model_ensemble(model_paths, X_test, y_test):
+def test_model_ensemble(model_paths, model_names, selected_features_dict, X_test, y_test):
     """
     测试模型集成功能
     """
@@ -226,58 +226,29 @@ def test_model_ensemble(model_paths, X_test, y_test):
     output_dir = "data/results/test/ensemble"
     os.makedirs(output_dir, exist_ok=True)
     
-    # 创建模型集成
+    # 创建模型集成, 传入 model_names 和 selected_features_dict
     ensemble = ModelEnsemble(
         model_paths=model_paths,
         ensemble_method="average",
-        model_names=["model_" + str(i) for i in range(len(model_paths))]
+        model_names=model_names, # 传入模型名称
+        selected_features=selected_features_dict # 传入选定特征字典
     )
     
     # 评估模型
     metrics = ensemble.evaluate(X_test, y_test)
-    
-    logger.info("集成模型评估指标:")
-    for k, v in metrics.items():
-        logger.info(f"  {k}: {v:.6f}")
+    logger.info(f"集成模型评估指标: {metrics}")
     
     # 绘制预测图
     plot_path = os.path.join(output_dir, "ensemble_predictions.png")
-    ensemble.plot_predictions(
-        X=X_test,
-        y=y_test,
-        title="集成预测对比",
-        save_path=plot_path
-    )
-    
-    # 测试预测平滑
-    smoother = PredictionSmoother(window_size=5, method="moving_avg")
-    
-    # 获取原始预测
-    predictions = ensemble.predict(X_test)
-    
-    # 平滑预测
-    smoothed = smoother.smooth(predictions)
-    
-    # 绘制对比图
-    smooth_plot_path = os.path.join(output_dir, "smoothed_predictions.png")
-    smoother.plot_comparison(
-        original=predictions,
-        smoothed=smoothed,
-        targets=y_test,
-        title="原始预测与平滑预测对比",
-        save_path=smooth_plot_path
-    )
-    
-    logger.info(f"集成预测图已保存至: {plot_path}")
-    logger.info(f"平滑预测图已保存至: {smooth_plot_path}")
+    ensemble.plot_predictions(X_test, y_test, save_path=plot_path, show_individual=True)
 
 
 def main():
     """
     主函数
     """
-    parser = argparse.ArgumentParser(description="模型调优功能测试")
-    parser.add_argument("--skip_optimization", action="store_true", help="跳过模型优化测试")
+    parser = argparse.ArgumentParser(description="测试模型调优、特征选择和集成功能")
+    parser.add_argument("--skip_optimization", action="store_true", help="跳过模型优化步骤")
     parser.add_argument("--skip_feature_selection", action="store_true", help="跳过特征选择测试")
     parser.add_argument("--skip_ensemble", action="store_true", help="跳过模型集成测试")
     parser.add_argument("--existing_model", type=str, help="使用已有模型路径进行测试")
@@ -290,37 +261,58 @@ def main():
     X_train, y_train, X_val, y_val, X_test, y_test = prepare_test_data()
     
     if X_train is None:
+        logger.error("数据准备失败，测试终止")
         return
-    
-    # 如果没有提供已有模型，训练基准模型
-    model_paths = []
-    if args.existing_model:
-        baseline_model_path = args.existing_model
-        logger.info(f"使用已有模型: {baseline_model_path}")
-        model_paths.append(baseline_model_path)
-    else:
-        baseline_model_path = train_baseline_model(X_train, y_train, X_val, y_val)
-        model_paths.append(baseline_model_path)
-    
-    # 测试模型优化
+
+    # 训练基准模型
+    baseline_model_path = train_baseline_model(X_train, y_train, X_val, y_val)
+    if baseline_model_path is None:
+        logger.error("基准模型训练失败，测试终止")
+        return
+
+    # 模型优化 (根据参数决定是否跳过)
     optimized_model_path = None
     if not args.skip_optimization:
+        logger.info("开始测试模型优化")
         optimized_model_path = test_model_optimization(X_train, y_train, X_val, y_val, X_test, y_test)
-        model_paths.append(optimized_model_path)
+        if optimized_model_path is None:
+            logger.warning("模型优化失败，继续测试")
+    else:
+        logger.info("跳过模型优化步骤")
+
+    # 特征选择 (基于基准模型)
+    logger.info("开始测试特征选择")
+    selected_model_path, selected_features_list = test_feature_selection(baseline_model_path, X_train, y_train, X_val, y_val)
+    if selected_model_path is None:
+        logger.error("特征选择失败，测试终止")
+        return
     
-    # 测试特征选择
-    if not args.skip_feature_selection:
-        # 使用基准模型或优化后的模型
-        model_path_for_selection = optimized_model_path if optimized_model_path else baseline_model_path
-        selected_model_path, selected_features = test_feature_selection(
-            model_path_for_selection, X_train, y_train, X_val, y_val
-        )
-        model_paths.append(selected_model_path)
-    
+    # 准备集成测试所需信息
+    model_paths_for_ensemble = [baseline_model_path]
+    model_names_for_ensemble = ["baseline"]
+    selected_features_dict = {} # 初始化空字典
+
+    # 添加优化后的模型 (如果存在)
+    if optimized_model_path:
+        model_paths_for_ensemble.append(optimized_model_path)
+        model_names_for_ensemble.append("optimized")
+        # 假设优化模型也使用所有特征，除非后续有针对它的特征选择步骤
+        # selected_features_dict["optimized"] = ... 
+
+    # 添加特征选择后的模型
+    if selected_model_path:
+        model_paths_for_ensemble.append(selected_model_path)
+        model_names_for_ensemble.append("selected")
+        # 将特征选择结果添加到字典
+        selected_features_dict["selected"] = selected_features_list 
+
+    logger.info(f"模型路径用于集成测试: {model_paths_for_ensemble}")
+    logger.info(f"模型名称用于集成测试: {model_names_for_ensemble}")
+    logger.info(f"选定特征用于集成测试: {selected_features_dict}")
+
     # 测试模型集成
-    if not args.skip_ensemble and len(model_paths) > 1:
-        test_model_ensemble(model_paths, X_test, y_test)
-    
+    test_model_ensemble(model_paths_for_ensemble, model_names_for_ensemble, selected_features_dict, X_test, y_test)
+
     logger.info("模型调优功能测试完成")
 
 
