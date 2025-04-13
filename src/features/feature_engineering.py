@@ -339,7 +339,7 @@ class FeatureEngineer:
                 importance_scores[feature] = explained_variance[i]
                 
             # 返回PCA转换后的数据作为DataFrame
-            X_selected_df = pd.DataFrame(X_selected, index=X.index, columns=selected_features)
+            X_selected_df = pd.DataFrame(X_selected, index=X_numeric.index, columns=selected_features)
             return X_selected_df, selected_features
         
         else:
@@ -358,10 +358,10 @@ class FeatureEngineer:
                                if score >= threshold]
             
             # 更新选择的特征矩阵
-            X_selected = X[selected_features].values
+            X_selected = X_numeric[selected_features].values
         
         # 返回选择后的特征矩阵和特征名称
-        X_selected_df = pd.DataFrame(X_selected, index=X.index, columns=selected_features)
+        X_selected_df = pd.DataFrame(X_selected, index=X_numeric.index, columns=selected_features)
         
         logger.info(f"特征选择完成，选择了 {len(selected_features)} 个特征")
         return X_selected_df, selected_features
