@@ -47,7 +47,6 @@ desktop.ini
 
 # 数据文件 (忽略所有数据，但保留目录结构)
 # 忽略所有数据文件
-data/**/*.csv
 data/**/*.json
 data/**/*.xlsx
 data/**/*.parquet
@@ -55,6 +54,12 @@ data/**/*.h5
 data/**/*.pickle
 data/**/*.npz
 data/**/*.npy
+# 忽略除raw目录外的CSV文件
+data/processed/**/*.csv
+data/processed/merged/**/*.csv
+data/processed/features/**/*.csv
+data/external/**/*.csv
+data/model_ready/**/*.csv
 
 # 保留目录结构
 !data/
@@ -97,8 +102,6 @@ logs/
 *.rar
 
 # 添加其他你不想上传的文件或文件夹
-# data/raw/
-
 # data/processed_data_cache.npz
 
 # Cache files
