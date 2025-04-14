@@ -53,6 +53,10 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="data/processed/features", 
                       help="输出特征目录")
     
+    # GPU加速参数
+    parser.add_argument("--use_gpu", action="store_true", help="使用GPU加速计算特征")
+    parser.add_argument("--batch_size", type=int, default=500000, help="GPU处理的批次大小，用于避免GPU内存不足")
+    
     # 其他参数
     parser.add_argument("--verbose", action="store_true", help="显示详细日志")
     
@@ -75,6 +79,27 @@ def main():
         # 加载配置
         config = load_config(args.config)
         
+        # 如果启用GPU，导入GPU支持模块并配置
+        if args.use_gpu:
+            try:
+                # 尝试导入GPU技术指标模块和GPU加速器
+                from src.features.gpu_accelerator import get_accelerator
+                from src.features.gpu_technical_indicators import GpuCompatibleTechnicalIndicators
+                
+                accelerator = get_accelerator()
+                if accelerator.is_available():
+                    logger.info("GPU加速已启用 - RAPIDS库已加载")
+                    # 使用GPU兼容的技术指标类替换原有实现
+                    from src.features.feature_engineering import FeatureEngineer
+                    FeatureEngineer._orig_tech_indicators = FeatureEngineer.tech_indicators
+                    FeatureEngineer.tech_indicators = GpuCompatibleTechnicalIndicators()
+                    logger.info("已替换技术指标计算为GPU加速版本")
+                else:
+                    logger.warning("无法启用GPU加速 - 未检测到RAPIDS库或GPU设备")
+            except ImportError as e:
+                logger.warning(f"无法导入GPU加速库: {e}")
+                logger.warning("将使用CPU进行计算，如需GPU加速，请安装RAPIDS库: 'pip install cudf-cu11 cuml-cu11 cupy-cuda11x'")
+        
         # 创建特征工程器
         feature_engineer = FeatureEngineer(args.config)
         
@@ -82,13 +107,17 @@ def main():
         if args.mode in ["compute", "all"]:
             logger.info("开始计算特征...")
             
+            # GPU处理的批量大小
+            batch_size = args.batch_size if args.use_gpu else None
+            
             # 处理所有交易对的数据
             processed_data = feature_engineer.process_all_data(
                 symbols=args.symbols,
                 timeframes=args.timeframes,
                 start_date=args.start_date,
                 end_date=args.end_date,
-                data_dir=args.data_dir
+                data_dir=args.data_dir,
+                batch_size=batch_size
             )
             
             logger.info(f"已为 {len(processed_data)} 个交易对计算特征")

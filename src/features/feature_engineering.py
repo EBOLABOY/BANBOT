@@ -456,7 +456,7 @@ class FeatureEngineer:
         logger.info(f"已创建 {len(horizons)} 个目标变量")
         return result_df
     
-    def process_data_for_symbol(self, symbol, timeframe, start_date=None, end_date=None, data_dir="data/processed/merged"):
+    def process_data_for_symbol(self, symbol, timeframe, start_date=None, end_date=None, data_dir="data/processed/merged", batch_size=None):
         """
         为单个交易对处理数据
         
@@ -466,6 +466,7 @@ class FeatureEngineer:
             start_date: 开始日期
             end_date: 结束日期
             data_dir: 数据目录
+            batch_size: 批处理大小，用于大数据集的分批处理（避免内存/GPU内存不足）
             
         返回:
             处理后的特征DataFrame和目标变量
@@ -478,44 +479,149 @@ class FeatureEngineer:
             pattern += f"_{end_date.replace('-', '')}"
         
         # 查找匹配的文件
-        files = [f for f in os.listdir(data_dir) if pattern in f]
-        
+        try:
+            files = [f for f in os.listdir(data_dir) if pattern in f]
+        except FileNotFoundError:
+            # 尝试查找子目录
+            alt_dir = os.path.join(data_dir, symbol, timeframe)
+            try:
+                files = [f for f in os.listdir(alt_dir) if pattern in f or f.endswith('.csv')]
+                if files:
+                    data_dir = alt_dir
+            except FileNotFoundError:
+                files = []
+                
         if not files:
-            logger.warning(f"找不到匹配的数据文件: {pattern}")
-            return None, None
+            # 再尝试直接加载精确的文件
+            direct_file = os.path.join(data_dir, f"{symbol}_{timeframe}.csv")
+            if os.path.exists(direct_file):
+                files = [f"{symbol}_{timeframe}.csv"]
+            else:
+                logger.warning(f"找不到匹配的数据文件: {pattern}")
+                return None, None
         
         # 加载数据
         filepath = os.path.join(data_dir, files[0])
-        df = pd.read_csv(filepath)
+        df = self.load_data(filepath)
         
-        # 设置时间索引
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df.set_index("timestamp", inplace=True)
-        
+        if df is None or df.empty:
+            logger.warning(f"数据文件 {filepath} 为空或无法加载")
+            return None, None
+            
         # 筛选日期范围
-        if start_date:
-            start_date = pd.to_datetime(start_date)
-            df = df[df.index >= start_date]
+        if "timestamp" in df.columns and not df.index.name == "timestamp":
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            
+            if start_date:
+                start_date_dt = pd.to_datetime(start_date)
+                df = df[df["timestamp"] >= start_date_dt]
+            
+            if end_date:
+                end_date_dt = pd.to_datetime(end_date)
+                df = df[df["timestamp"] <= end_date_dt]
+        elif df.index.name == "timestamp":
+            if start_date:
+                start_date_dt = pd.to_datetime(start_date)
+                df = df[df.index >= start_date_dt]
+            
+            if end_date:
+                end_date_dt = pd.to_datetime(end_date)
+                df = df[df.index <= end_date_dt]
         
-        if end_date:
-            end_date = pd.to_datetime(end_date)
-            df = df[df.index <= end_date]
+        if df.empty:
+            logger.warning(f"筛选日期范围后数据为空")
+            return None, None
+            
+        # 创建输出目录
+        output_dir = os.path.join(self.features_path, symbol)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # 计算特征
-        features_df = self.compute_features(df)
-        
-        # 创建目标变量
-        targets_df = self.create_target_variables(features_df)
-        
-        # 处理特征
-        processed_features = self.preprocess_features(features_df)
-        
-        logger.info(f"已处理 {symbol} 的 {timeframe} 数据，共 {len(processed_features)} 条记录和 {len(processed_features.columns)} 个特征")
-        
-        return processed_features, targets_df
+        # 准备分批处理
+        if batch_size and len(df) > batch_size:
+            logger.info(f"数据大小为 {len(df)} 行，启用批处理 (每批 {batch_size} 行)")
+            
+            # 预先创建空的结果DataFrame
+            features_df_all = pd.DataFrame()
+            targets_df_all = pd.DataFrame()
+            
+            # 计算批次数
+            num_batches = (len(df) + batch_size - 1) // batch_size
+            
+            # 分批处理
+            for i in range(num_batches):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, len(df))
+                
+                logger.info(f"处理批次 {i+1}/{num_batches} (行 {batch_start} 到 {batch_end})")
+                
+                # 提取当前批次
+                batch_df = df.iloc[batch_start:batch_end].copy()
+                
+                # 计算特征
+                batch_features_df = self.compute_features(batch_df)
+                
+                # 创建目标变量
+                batch_targets_df = self.create_target_variables(batch_features_df)
+                
+                # 处理特征
+                batch_processed_features = self.preprocess_features(batch_features_df)
+                
+                # 添加到结果
+                features_df_all = pd.concat([features_df_all, batch_processed_features])
+                targets_df_all = pd.concat([targets_df_all, batch_targets_df])
+                
+                # 释放内存
+                del batch_df, batch_features_df, batch_targets_df, batch_processed_features
+                import gc
+                gc.collect()
+            
+            # 确定文件名后缀
+            date_suffix = ""
+            if start_date:
+                date_suffix += f"_{start_date.replace('-', '')}"
+            if end_date:
+                date_suffix += f"_{end_date.replace('-', '')}"
+            
+            # 保存特征和目标变量
+            features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
+            targets_filepath = os.path.join(output_dir, f"targets_{timeframe}{date_suffix}.csv")
+            
+            features_df_all.to_csv(features_filepath)
+            targets_df_all.to_csv(targets_filepath)
+            
+            logger.info(f"已保存 {symbol} 的 {timeframe} 特征和目标变量，共 {len(features_df_all)} 条记录和 {len(features_df_all.columns)} 个特征")
+            
+            return features_df_all, targets_df_all
+        else:
+            # 正常处理（不分批）
+            # 计算特征
+            features_df = self.compute_features(df)
+            
+            # 创建目标变量
+            targets_df = self.create_target_variables(features_df)
+            
+            # 处理特征
+            processed_features = self.preprocess_features(features_df)
+            
+            # 确定文件名后缀
+            date_suffix = ""
+            if start_date:
+                date_suffix += f"_{start_date.replace('-', '')}"
+            if end_date:
+                date_suffix += f"_{end_date.replace('-', '')}"
+            
+            # 保存特征和目标变量
+            features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
+            targets_filepath = os.path.join(output_dir, f"targets_{timeframe}{date_suffix}.csv")
+            
+            processed_features.to_csv(features_filepath)
+            targets_df.to_csv(targets_filepath)
+            
+            logger.info(f"已处理 {symbol} 的 {timeframe} 数据，共 {len(processed_features)} 条记录和 {len(processed_features.columns)} 个特征")
+            
+            return processed_features, targets_df
     
-    def process_all_data(self, symbols=None, timeframes=None, start_date=None, end_date=None, data_dir="data/processed/merged"):
+    def process_all_data(self, symbols=None, timeframes=None, start_date=None, end_date=None, data_dir="data/processed/merged", batch_size=None):
         """
         处理所有交易对的数据
         
@@ -525,30 +631,39 @@ class FeatureEngineer:
             start_date: 开始日期
             end_date: 结束日期
             data_dir: 数据目录
+            batch_size: 批处理大小，用于大数据集的分批处理
             
         返回:
             处理后的特征和目标变量字典
         """
         # 如果未指定交易对和时间框架，读取所有可用的文件
         if symbols is None or timeframes is None:
-            available_files = os.listdir(data_dir)
-            symbol_timeframe_pairs = []
-            
-            for filename in available_files:
-                parts = filename.split('_')
-                if len(parts) >= 2:
-                    symbol = parts[0]
-                    timeframe = parts[1]
-                    symbol_timeframe_pairs.append((symbol, timeframe))
-            
-            # 去重
-            symbol_timeframe_pairs = list(set(symbol_timeframe_pairs))
-            
-            if not symbols:
-                symbols = list(set([pair[0] for pair in symbol_timeframe_pairs]))
-            
-            if not timeframes:
-                timeframes = list(set([pair[1] for pair in symbol_timeframe_pairs]))
+            try:
+                available_files = os.listdir(data_dir)
+                symbol_timeframe_pairs = []
+                
+                for filename in available_files:
+                    parts = filename.split('_')
+                    if len(parts) >= 2:
+                        symbol = parts[0]
+                        timeframe = parts[1]
+                        symbol_timeframe_pairs.append((symbol, timeframe))
+                
+                # 去重
+                symbol_timeframe_pairs = list(set(symbol_timeframe_pairs))
+                
+                if not symbols:
+                    symbols = list(set([pair[0] for pair in symbol_timeframe_pairs]))
+                
+                if not timeframes:
+                    timeframes = list(set([pair[1] for pair in symbol_timeframe_pairs]))
+            except FileNotFoundError:
+                logger.warning(f"数据目录 {data_dir} 不存在")
+                # 尝试从配置中获取默认值
+                if not symbols:
+                    symbols = self.config.get("data", {}).get("symbols", ["BTCUSDT"])
+                if not timeframes:
+                    timeframes = self.config.get("data", {}).get("timeframes", ["1m", "1h"])
         
         # 处理结果存储
         processed_data = {}
@@ -557,10 +672,11 @@ class FeatureEngineer:
         for symbol in tqdm(symbols, desc="处理交易对"):
             processed_data[symbol] = {}
             
-            for timeframe in timeframes:
+            for timeframe in tqdm(timeframes, desc=f"处理 {symbol} 的时间框架", leave=False):
                 try:
+                    logger.info(f"开始处理 {symbol} {timeframe} 数据...")
                     features_df, targets_df = self.process_data_for_symbol(
-                        symbol, timeframe, start_date, end_date, data_dir
+                        symbol, timeframe, start_date, end_date, data_dir, batch_size=batch_size
                     )
                     
                     if features_df is not None and targets_df is not None:
@@ -568,32 +684,22 @@ class FeatureEngineer:
                             'features': features_df,
                             'targets': targets_df
                         }
-                        
-                        # 保存处理后的数据
-                        output_dir = os.path.join(self.features_path, symbol)
-                        os.makedirs(output_dir, exist_ok=True)
-                        
-                        # 确定文件名后缀
-                        date_suffix = ""
-                        if start_date:
-                            date_suffix += f"_{start_date.replace('-', '')}"
-                        if end_date:
-                            date_suffix += f"_{end_date.replace('-', '')}"
-                        
-                        # 保存特征和目标变量
-                        features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
-                        targets_filepath = os.path.join(output_dir, f"targets_{timeframe}{date_suffix}.csv")
-                        
-                        features_df.to_csv(features_filepath)
-                        targets_df.to_csv(targets_filepath)
-                        
-                        logger.info(f"已保存 {symbol} 的 {timeframe} 特征和目标变量")
+                        logger.info(f"完成处理 {symbol} {timeframe} 数据")
+                    else:
+                        logger.warning(f"处理 {symbol} {timeframe} 数据未产生有效结果")
                 
                 except Exception as e:
-                    logger.error(f"处理 {symbol} 的 {timeframe} 数据时出错: {e}")
+                    logger.error(f"处理 {symbol} 的 {timeframe} 数据时出错: {str(e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                
+                # 释放内存
+                import gc
+                gc.collect()
         
+        logger.info(f"已处理 {len(processed_data)} 个交易对的数据")
         return processed_data
-        
+    
     def load_data(self, filepath):
         """
         加载数据文件
