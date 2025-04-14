@@ -10,6 +10,8 @@ import os
 import sys
 import glob
 import pandas as pd
+import zipfile
+import requests
 from datetime import datetime
 import shutil
 
@@ -17,6 +19,50 @@ import shutil
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 TEMP_DIR = os.path.join(BASE_DIR, 'data', 'temp')
+
+def download_file(url, dest_folder, filename, retry=3):
+    """
+    下载文件并显示进度条
+    
+    Args:
+        url: 文件URL
+        dest_folder: 目标文件夹
+        filename: 文件名
+        retry: 重试次数
+    
+    Returns:
+        下载的文件路径或None（如果下载失败）
+    """
+    dest_path = os.path.join(dest_folder, filename)
+    
+    # 如果文件已存在，直接返回路径
+    if os.path.exists(dest_path):
+        print(f"文件已存在: {dest_path}")
+        return dest_path
+    
+    attempts = 0
+    while attempts < retry:
+        try:
+            print(f"下载 {url} 到 {dest_path}")
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            
+            # 获取文件大小
+            total_size = int(response.headers.get('content-length', 0))
+            
+            # 写入文件
+            with open(dest_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB
+                    f.write(chunk)
+            
+            return dest_path
+        
+        except requests.exceptions.RequestException as e:
+            print(f"下载失败 ({attempts+1}/{retry}): {str(e)}")
+            attempts += 1
+    
+    print(f"下载 {url} 失败，已达到最大重试次数")
+    return None
 
 def fix_timestamp_parsing(csv_file):
     """
@@ -57,49 +103,101 @@ def fix_timestamp_parsing(csv_file):
         print(f"修复文件 {csv_file} 失败: {str(e)}")
         return None
 
-def process_2025_data():
-    """处理2025年的数据"""
-    # 查找所有2025年的目录
-    pattern = os.path.join(TEMP_DIR, "BTCUSDT_1m_2025_*")
-    dirs = glob.glob(pattern)
+def process_zip_file(zip_path, month):
+    """
+    处理ZIP文件，解压并修复其中的CSV文件
     
-    if not dirs:
-        print("未找到2025年数据目录")
-        return
+    Args:
+        zip_path: ZIP文件路径
+        month: 月份 (如 '01', '02', '03')
     
-    print(f"找到 {len(dirs)} 个2025年数据目录")
-    
-    # 处理每个目录
-    all_dfs = []
-    for dir_path in dirs:
-        month = os.path.basename(dir_path).split('_')[-1]
+    Returns:
+        修复后的DataFrame或None
+    """
+    try:
+        # 创建临时目录
+        temp_dir = os.path.join(TEMP_DIR, f"BTCUSDT_1m_2025_{month}_tmp")
+        os.makedirs(temp_dir, exist_ok=True)
         
-        # 找到目录中的CSV文件
-        csv_files = glob.glob(os.path.join(dir_path, "*.csv"))
+        print(f"解压 {zip_path} 到 {temp_dir}")
+        
+        # 解压ZIP文件
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # 查找解压后的CSV文件
+        csv_files = glob.glob(os.path.join(temp_dir, "*.csv"))
+        
         if not csv_files:
-            print(f"目录 {dir_path} 中没有CSV文件")
-            continue
+            print(f"在 {zip_path} 中未找到CSV文件")
+            return None
         
-        # 修复每个CSV文件
+        # 处理每个CSV文件
+        dfs = []
         for csv_file in csv_files:
             df = fix_timestamp_parsing(csv_file)
             if df is not None:
-                # 保存修复后的数据
-                output_path = os.path.join(RAW_DATA_DIR, f"BTCUSDT_1m_2025_{month}.csv")
-                df.to_csv(output_path, index=False)
-                print(f"已将修复后的数据保存到 {output_path}，共 {len(df)} 条记录")
+                dfs.append(df)
+        
+        # 清理临时目录
+        shutil.rmtree(temp_dir)
+        
+        if not dfs:
+            return None
+        
+        # 合并所有DataFrame
+        merged_df = pd.concat(dfs)
+        
+        # 排序并去重
+        merged_df = merged_df.sort_values('timestamp').drop_duplicates(subset='timestamp')
+        
+        # 保存到RAW_DATA_DIR
+        output_path = os.path.join(RAW_DATA_DIR, f"BTCUSDT_1m_2025_{month}.csv")
+        merged_df.to_csv(output_path, index=False)
+        print(f"已将2025-{month}数据保存到 {output_path}，共 {len(merged_df)} 条记录")
+        
+        return merged_df
+    
+    except Exception as e:
+        print(f"处理ZIP文件 {zip_path} 失败: {str(e)}")
+        return None
+
+def process_2025_data():
+    """处理2025年的数据"""
+    # 尝试从URL直接下载2025年数据
+    months = ['01', '02', '03']
+    
+    # 存储所有成功处理的数据
+    all_dfs = []
+    
+    for month in months:
+        # 构建文件名
+        filename = f"BTCUSDT-1m-2025-{month}.zip"
+        
+        # 尝试从原始数据目录查找文件
+        zip_path = os.path.join(RAW_DATA_DIR, filename)
+        if not os.path.exists(zip_path):
+            # 如果不存在，则尝试下载
+            url = f"https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/{filename}"
+            zip_path = download_file(url, TEMP_DIR, filename)
+        
+        if zip_path and os.path.exists(zip_path):
+            df = process_zip_file(zip_path, month)
+            if df is not None:
                 all_dfs.append(df)
     
     # 合并所有修复的数据
     if all_dfs:
-        merged_df = pd.concat(all_dfs)
-        # 时间戳是字符串格式，按字符串排序
-        merged_df = merged_df.sort_values('timestamp').drop_duplicates(subset='timestamp')
+        print("合并所有2025年数据...")
+        merged_2025_df = pd.concat(all_dfs)
+        merged_2025_df = merged_2025_df.sort_values('timestamp').drop_duplicates(subset='timestamp')
         
-        # 获取主数据文件
-        main_files = glob.glob(os.path.join(RAW_DATA_DIR, "BTCUSDT_1m_*.csv"))
+        # 查找2021-2024年的主数据文件
+        main_files = [f for f in glob.glob(os.path.join(RAW_DATA_DIR, "BTCUSDT_1m_*.csv")) 
+                     if "2025" not in f and "fixed" not in f]
+        
         if main_files:
-            # 找到主要的数据文件
+            # 找到主要数据文件
             main_file = sorted(main_files)[-1]
             print(f"找到主数据文件: {main_file}")
             
@@ -107,8 +205,7 @@ def process_2025_data():
             main_df = pd.read_csv(main_file)
             
             # 合并数据
-            combined_df = pd.concat([main_df, merged_df])
-            # 排序并去重
+            combined_df = pd.concat([main_df, merged_2025_df])
             combined_df = combined_df.sort_values('timestamp').drop_duplicates(subset='timestamp')
             
             # 保存完整数据
@@ -116,79 +213,50 @@ def process_2025_data():
             combined_df.to_csv(output_path, index=False)
             print(f"已保存完整数据到 {output_path}，共 {len(combined_df)} 条记录")
         else:
-            print("未找到主数据文件")
+            # 如果没有主数据文件，只保存2025年数据
+            output_path = os.path.join(RAW_DATA_DIR, f"BTCUSDT_1m_2025_merged.csv")
+            merged_2025_df.to_csv(output_path, index=False)
+            print(f"已保存2025年数据到 {output_path}，共 {len(merged_2025_df)} 条记录")
     else:
-        print("没有成功修复任何2025年数据")
+        print("没有成功处理任何2025年数据")
 
-def download_april_2025():
-    """手动获取2025年4月数据（部分月份）"""
-    try:
-        from src.download_binance_data import download_file, extract_zip, verify_checksum
-        
-        # 创建临时目录
-        temp_dir = os.path.join(TEMP_DIR, "BTCUSDT_1m_2025_04")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # 下载当日数据而非月度数据
-        # 构建今天的日期字符串
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        # 币安提供当日数据的URL格式
-        filename = f"BTCUSDT-1m-{today}.zip"
-        checksum_filename = f"{filename}.CHECKSUM"
-        
-        # 构建URL（使用每日数据而非月度数据）
-        url_prefix = f"https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m"
-        file_url = f"{url_prefix}/{filename}"
-        checksum_url = f"{url_prefix}/{checksum_filename}"
-        
-        print(f"尝试下载当日数据: {file_url}")
-        
-        # 下载ZIP文件
-        zip_path = download_file(file_url, TEMP_DIR, filename)
-        if not zip_path:
-            print("下载当日数据失败")
-            return
-        
-        # 下载并验证校验和
-        checksum_path = download_file(checksum_url, TEMP_DIR, checksum_filename)
-        if checksum_path and not verify_checksum(zip_path, checksum_path):
-            print(f"校验和验证失败，跳过当日数据")
-            return
-        
-        # 解压ZIP文件
-        csv_files = extract_zip(zip_path, temp_dir)
-        if not csv_files:
-            print("解压当日数据失败")
-            return
-        
-        # 使用修复方法处理
-        for csv_file in csv_files:
-            df = fix_timestamp_parsing(csv_file)
-            if df is not None:
-                # 保存修复后的数据
-                output_path = os.path.join(RAW_DATA_DIR, f"BTCUSDT_1m_2025_04_partial.csv")
-                df.to_csv(output_path, index=False)
-                print(f"已将当日数据保存到 {output_path}，共 {len(df)} 条记录")
-        
-        print("当日数据处理完成")
+def download_latest_data():
+    """下载最新的数据（2025年1-3月）"""
+    # 下载2025年1-3月数据
+    months = ['01', '02', '03']
     
-    except Exception as e:
-        print(f"处理当日数据失败: {e}")
+    for month in months:
+        # 构建文件名
+        filename = f"BTCUSDT-1m-2025-{month}.zip"
+        
+        # 构建URL
+        url = f"https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/{filename}"
+        print(f"尝试下载: {url}")
+        
+        zip_path = download_file(url, TEMP_DIR, filename)
+        if zip_path:
+            # 如果下载成功，处理ZIP文件
+            df = process_zip_file(zip_path, month)
+            if df is not None:
+                print(f"成功处理2025-{month}月数据，获取了 {len(df)} 条记录")
+    
+    print("2025年数据下载尝试完成")
 
 def main():
     """主函数"""
-    # 确保输出目录存在
+    # 确保目录存在
     os.makedirs(RAW_DATA_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
     
-    # 处理已下载的2025年数据
+    print("开始处理2025年数据...")
+    
+    # 下载并处理2025年1-3月数据
+    download_latest_data()
+    
+    # 合并处理所有已下载数据
     process_2025_data()
     
-    # 尝试获取2025年4月的部分数据（当日数据）
-    download_april_2025()
-    
-    print("修复完成！")
+    print("2025年数据处理完成！")
 
 if __name__ == "__main__":
     main() 
