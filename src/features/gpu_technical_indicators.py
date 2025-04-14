@@ -426,28 +426,62 @@ class GPUTechnicalIndicators:
     # 其他计算方法可以按照类似方式实现:
     # calculate_volatility_features, calculate_trend_features, calculate_momentum_features 等
 
-# 允许创建一个与原始TechnicalIndicators兼容的接口
+# 允许创建一个与原始TechnicalIndicators类兼容的接口
 class GpuCompatibleTechnicalIndicators:
     """兼容原始TechnicalIndicators类的接口，但支持GPU加速"""
     
     def __init__(self):
         self._gpu_indicators = GPUTechnicalIndicators()
         logger.info("初始化GPU兼容技术指标类 - 使用GPU加速")
+        # 强制GPU测试
+        if gpu_accel.is_available() and gpu_accel.cupy is not None:
+            try:
+                test_array = gpu_accel.cupy.random.rand(1000, 1000)
+                test_result = gpu_accel.cupy.sum(test_array)
+                logger.info(f"GPU测试结果: {test_result}, 确认GPU计算正常")
+            except Exception as e:
+                logger.error(f"GPU测试失败: {e}")
     
-    def tsi(self, close, r=25, s=13):
-        """与原始接口兼容的方法"""
-        return self._gpu_indicators.tsi(close, r, s)
+    @staticmethod
+    def tsi(close, r=25, s=13):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.tsi(close, r, s)
     
-    def calculate_indicators(self, df, indicators=None, window_sizes=None):
-        """与原始接口兼容的方法"""
-        return self._gpu_indicators.calculate_indicators(df, indicators, window_sizes)
+    @staticmethod
+    def calculate_indicators(df, indicators=None, window_sizes=None):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_indicators(df, indicators, window_sizes)
     
-    def calculate_price_features(self, df):
-        """与原始接口兼容的方法"""
-        return self._gpu_indicators.calculate_price_features(df)
+    @staticmethod
+    def calculate_price_features(df):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_price_features(df)
     
-    def calculate_volume_features(self, df):
-        """与原始接口兼容的方法"""
-        return self._gpu_indicators.calculate_volume_features(df)
+    @staticmethod
+    def calculate_volume_features(df):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_volume_features(df)
+    
+    @staticmethod
+    def calculate_volatility_features(df):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_volatility_features(df)
+    
+    @staticmethod
+    def calculate_trend_features(df):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_trend_features(df)
+    
+    @staticmethod
+    def calculate_momentum_features(df):
+        """静态方法接口兼容"""
+        _gpu_indicators = GPUTechnicalIndicators()
+        return _gpu_indicators.calculate_momentum_features(df)
     
     # 其他接口方法... 
