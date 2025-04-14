@@ -127,7 +127,15 @@ class GPUTechnicalIndicators:
         if self.gpu_available:
             try:
                 # 转换到GPU
+                logger.info("开始在GPU上计算技术指标")
                 gpu_df = gpu_accel.to_gpu(result_df)
+                
+                # 监控GPU内存使用
+                if hasattr(gpu_accel, 'cupy') and gpu_accel.cupy is not None:
+                    mem_info = gpu_accel.cupy.cuda.Device().mem_info
+                    total_mem = mem_info[1]
+                    used_mem = mem_info[1] - mem_info[0]
+                    logger.info(f"GPU内存使用: {used_mem//(1024*1024)}MB / {total_mem//(1024*1024)}MB")
                 
                 # 计算移动平均线指标
                 if 'SMA' in indicators:
@@ -139,28 +147,74 @@ class GPUTechnicalIndicators:
                     for window in window_sizes:
                         gpu_df[f'EMA_{window}'] = gpu_df['close'].ewm(span=window, adjust=False).mean()
                 
-                # 计算加权移动平均线 (使用EMA代替)
+                # 计算加权移动平均线
                 if 'WMA' in indicators:
                     for window in window_sizes:
-                        gpu_df[f'WMA_{window}'] = gpu_df['close'].ewm(span=window, adjust=False).mean()
+                        # 真正的加权平均，而不是用EMA代替
+                        weights = np.arange(1, window + 1)
+                        weights_gpu = gpu_accel.cupy.array(weights) if hasattr(gpu_accel, 'cupy') else weights
+                        gpu_df[f'WMA_{window}'] = gpu_df['close'].rolling(window).apply(
+                            lambda x: (x * weights_gpu).sum() / weights_gpu.sum(),
+                            raw=True
+                        )
+                
+                # 尝试在GPU上计算更多指标，而不是转回CPU
+                # 计算RSI
+                if 'RSI' in indicators:
+                    for window in [6, 14, 20]:
+                        # 使用GPU计算RSI
+                        delta = gpu_df['close'].diff()
+                        gain = delta.clip(lower=0)
+                        loss = -delta.clip(upper=0)
+                        avg_gain = gain.rolling(window=window).mean()
+                        avg_loss = loss.rolling(window=window).mean()
+                        rs = avg_gain / avg_loss
+                        gpu_df[f'RSI_{window}'] = 100 - (100 / (1 + rs))
+                
+                # 计算布林带，使用GPU计算
+                if 'BBANDS' in indicators:
+                    for window in [20, 50]:
+                        # 计算布林带，完全在GPU执行
+                        mid = gpu_df['close'].rolling(window=window).mean()
+                        std = gpu_df['close'].rolling(window=window).std()
+                        gpu_df[f'BBANDS_middle_{window}'] = mid
+                        gpu_df[f'BBANDS_upper_{window}'] = mid + 2 * std  
+                        gpu_df[f'BBANDS_lower_{window}'] = mid - 2 * std
+                        gpu_df[f'BBANDS_width_{window}'] = (2 * std) / mid
+                
+                # 计算平均真实范围，使用GPU计算
+                if 'ATR' in indicators:
+                    for window in [14, 20]:
+                        tr1 = gpu_df['high'] - gpu_df['low']
+                        tr2 = (gpu_df['high'] - gpu_df['close'].shift()).abs()
+                        tr3 = (gpu_df['low'] - gpu_df['close'].shift()).abs()
+                        tr = gpu_accel.cudf.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                        gpu_df[f'ATR_{window}'] = tr.rolling(window=window).mean()
+                
+                # 还有适合GPU的其他指标可以在这里添加...
+                
+                # 监控计算后GPU内存
+                if hasattr(gpu_accel, 'cupy') and gpu_accel.cupy is not None:
+                    mem_info = gpu_accel.cupy.cuda.Device().mem_info
+                    total_mem = mem_info[1]
+                    used_mem = mem_info[1] - mem_info[0]
+                    logger.info(f"计算后GPU内存使用: {used_mem//(1024*1024)}MB / {total_mem//(1024*1024)}MB")
                 
                 # 转回CPU继续计算其他指标
                 result_df = gpu_accel.to_cpu(gpu_df)
-                logger.info("已使用GPU计算基础指标")
+                logger.info("已使用GPU计算主要指标，转回CPU完成剩余计算")
             except Exception as e:
                 logger.error(f"GPU计算指标失败，回退到CPU: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         
-        # 计算MACD (使用CPU，因为cuDF可能不支持复杂指标)
-        if 'MACD' in indicators:
+        # 在CPU上计算其他指标
+        # 计算MACD
+        if 'MACD' in indicators and 'MACD' not in result_df.columns:
             # 默认参数：快线=12，慢线=26，信号线=9
             result_df['MACD'] = ta.trend.macd(result_df['close'], window_slow=26, window_fast=12)
             result_df['MACD_signal'] = ta.trend.macd_signal(result_df['close'], window_slow=26, window_fast=12, window_sign=9)
             result_df['MACD_hist'] = ta.trend.macd_diff(result_df['close'], window_slow=26, window_fast=12, window_sign=9)
-        
-        # 计算RSI
-        if 'RSI' in indicators:
-            for window in [6, 14, 20]:
-                result_df[f'RSI_{window}'] = ta.momentum.rsi(result_df['close'], window=window)
         
         # 其他指标计算...与原始版本相同
         # 计算随机振荡器
@@ -378,29 +432,22 @@ class GpuCompatibleTechnicalIndicators:
     
     def __init__(self):
         self._gpu_indicators = GPUTechnicalIndicators()
+        logger.info("初始化GPU兼容技术指标类 - 使用GPU加速")
     
-    @staticmethod
-    def tsi(close, r=25, s=13):
-        """静态方法接口兼容"""
-        _gpu_indicators = GPUTechnicalIndicators()
-        return _gpu_indicators.tsi(close, r, s)
+    def tsi(self, close, r=25, s=13):
+        """与原始接口兼容的方法"""
+        return self._gpu_indicators.tsi(close, r, s)
     
-    @staticmethod
-    def calculate_indicators(df, indicators=None, window_sizes=None):
-        """静态方法接口兼容"""
-        _gpu_indicators = GPUTechnicalIndicators()
-        return _gpu_indicators.calculate_indicators(df, indicators, window_sizes)
+    def calculate_indicators(self, df, indicators=None, window_sizes=None):
+        """与原始接口兼容的方法"""
+        return self._gpu_indicators.calculate_indicators(df, indicators, window_sizes)
     
-    @staticmethod
-    def calculate_price_features(df):
-        """静态方法接口兼容"""
-        _gpu_indicators = GPUTechnicalIndicators()
-        return _gpu_indicators.calculate_price_features(df)
+    def calculate_price_features(self, df):
+        """与原始接口兼容的方法"""
+        return self._gpu_indicators.calculate_price_features(df)
     
-    @staticmethod
-    def calculate_volume_features(df):
-        """静态方法接口兼容"""
-        _gpu_indicators = GPUTechnicalIndicators()
-        return _gpu_indicators.calculate_volume_features(df)
+    def calculate_volume_features(self, df):
+        """与原始接口兼容的方法"""
+        return self._gpu_indicators.calculate_volume_features(df)
     
-    # 其他静态方法接口... 
+    # 其他接口方法... 
