@@ -91,8 +91,14 @@ def main():
                     logger.info("GPU加速已启用 - RAPIDS库已加载")
                     # 使用GPU兼容的技术指标类替换原有实现
                     from src.features.feature_engineering import FeatureEngineer
-                    FeatureEngineer._orig_tech_indicators = FeatureEngineer.tech_indicators
-                    FeatureEngineer.tech_indicators = GpuCompatibleTechnicalIndicators()
+                    # FeatureEngineer._orig_tech_indicators = FeatureEngineer.tech_indicators
+                    # FeatureEngineer.tech_indicators = GpuCompatibleTechnicalIndicators()
+                    
+                    # 保存原始的TechnicalIndicators类
+                    import src.features.technical_indicators
+                    original_technical_indicators = src.features.technical_indicators.TechnicalIndicators
+                    # 替换为GPU兼容版本
+                    src.features.technical_indicators.TechnicalIndicators = GpuCompatibleTechnicalIndicators
                     logger.info("已替换技术指标计算为GPU加速版本")
                 else:
                     logger.warning("无法启用GPU加速 - 未检测到RAPIDS库或GPU设备")
