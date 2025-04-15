@@ -17,17 +17,51 @@ logger = get_logger(__name__)
 def match_shape(a, b):
     """
     将张量a的形状调整为与b一致，用于安全广播。
+    处理常见维度不匹配情况。
     """
     if a.shape == b.shape:
         return a
-    if a.dim() == 1 and b.dim() == 2:
+
+    a_dim, b_dim = a.dim(), b.dim()
+    a_shape, b_shape = a.shape, b.shape
+
+    # Case 1: 1D vs 2D ([N] vs [M, K])
+    if a_dim == 1 and b_dim == 2:
+        # Expand 1D tensor 'a' to match 2D tensor 'b'
+        # Typically assumes a should be broadcast across the second dim of b
         return a.unsqueeze(1).expand_as(b)
-    if a.dim() == 2 and b.dim() == 1:
-        return a.squeeze()
-    if a.dim() == 1 and b.dim() == 1 and a.shape[0] == b.shape[0]:
-        return a
-    # 其他情况
-    return a.expand_as(b)
+
+    # Case 2: 2D vs 1D ([N, C] vs [M])
+    if a_dim == 2 and b_dim == 1:
+        # If 'a' is [N, 1], squeeze it to match [N]
+        if a_shape[1] == 1 and a_shape[0] == b_shape[0]:
+            return a.squeeze(1)
+        # If 'a' is [N, C] (C > 1) and 'b' is [N], use the first column of 'a'
+        elif a_shape[1] > 1 and a_shape[0] == b_shape[0]:
+            logger.warning(f"match_shape: Matching 2D tensor a (shape {a_shape}) with 1D tensor b (shape {b_shape}) "
+                           f"by using the first column of a. Verify this assumption.")
+            return a[:, 0]
+        # Other 2D vs 1D mismatches are ambiguous
+        else:
+             raise ValueError(f"match_shape: Cannot unambiguously match shape {a_shape} with {b_shape}")
+
+    # Case 3: 1D vs 1D (different lengths) - usually an error unless broadcasting is intended
+    if a_dim == 1 and b_dim == 1:
+         # Allow broadcasting if one dimension is 1, otherwise it's likely an error
+         if a_shape[0] == 1 or b_shape[0] == 1:
+             logger.warning(f"match_shape: Broadcasting 1D tensor {a_shape} to {b_shape}. Verify this behavior.")
+             return a.expand_as(b) # Fallback to expand_as, might still fail
+         else:
+             raise ValueError(f"match_shape: Cannot match 1D shapes {a_shape} and {b_shape} without ambiguity.")
+
+
+    # Fallback for other cases (e.g., 2D vs 2D with different shapes)
+    logger.warning(f"match_shape: Falling back to expand_as for shapes {a_shape} vs {b_shape}. This might fail.")
+    try:
+        return a.expand_as(b)
+    except RuntimeError as e:
+        logger.error(f"match_shape: expand_as failed for shapes {a_shape} vs {b_shape}: {e}")
+        raise e
 
 class PyTorchTechnicalIndicators:
     """
