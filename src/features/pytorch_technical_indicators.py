@@ -677,27 +677,28 @@ class PyTorchTechnicalIndicators:
         """
         try:
             # 确保输入是2D的
-            if tensor.dim() == 1:
+            original_dim = tensor.dim()
+            if original_dim == 1:
                 tensor = tensor.unsqueeze(1)
-                
+            
             batch_size, features = tensor.shape
             
             # 使用unfold操作获取滚动窗口
-            # 注意：这会产生 [batch_size-window+1, window, features] 的张量
+            # unfold 返回 [N-window_size+1, C, window_size]
             if batch_size >= window:
                 windows = tensor.unfold(0, window, 1)
                 
-                # 计算每个窗口的标准差
+                # 计算每个窗口的标准差，对窗口维度 (dim=2) 计算
                 # 结果形状为 [batch_size-window+1, features]
-                stds = torch.std(windows, dim=1)
+                stds = torch.std(windows, dim=2)
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, stds], dim=0)
                 
-                # 降维，rolling_window后立即 squeeze(1)
-                if result.dim() == 3 and result.shape[1] == 1:
+                # 恢复原始维度
+                if original_dim == 1:
                     result = result.squeeze(1)
                 
                 return result
@@ -721,25 +722,27 @@ class PyTorchTechnicalIndicators:
         """
         try:
             # 确保输入是2D的
-            if tensor.dim() == 1:
+            original_dim = tensor.dim()
+            if original_dim == 1:
                 tensor = tensor.unsqueeze(1)
                 
             batch_size, features = tensor.shape
             
             if batch_size >= window:
                 # 使用unfold操作获取滚动窗口
+                # unfold 返回 [N-window_size+1, C, window_size]
                 windows = tensor.unfold(0, window, 1)
                 
-                # 计算每个窗口的最大值
-                max_values = torch.max(windows, dim=1)[0]
+                # 计算每个窗口的最大值，对窗口维度 (dim=2) 计算
+                max_values = torch.max(windows, dim=2)[0]
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, max_values], dim=0)
                 
-                # 降维，rolling_window后立即 squeeze(1)
-                if result.dim() == 3 and result.shape[1] == 1:
+                # 恢复原始维度
+                if original_dim == 1:
                     result = result.squeeze(1)
                 
                 return result
@@ -763,25 +766,27 @@ class PyTorchTechnicalIndicators:
         """
         try:
             # 确保输入是2D的
-            if tensor.dim() == 1:
+            original_dim = tensor.dim()
+            if original_dim == 1:
                 tensor = tensor.unsqueeze(1)
                 
             batch_size, features = tensor.shape
             
             if batch_size >= window:
                 # 使用unfold操作获取滚动窗口
+                # unfold 返回 [N-window_size+1, C, window_size]
                 windows = tensor.unfold(0, window, 1)
                 
-                # 计算每个窗口的最小值
-                min_values = torch.min(windows, dim=1)[0]
+                # 计算每个窗口的最小值，对窗口维度 (dim=2) 计算
+                min_values = torch.min(windows, dim=2)[0]
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, min_values], dim=0)
                 
-                # 降维，rolling_window后立即 squeeze(1)
-                if result.dim() == 3 and result.shape[1] == 1:
+                # 恢复原始维度
+                if original_dim == 1:
                     result = result.squeeze(1)
                 
                 return result
@@ -803,33 +808,44 @@ class PyTorchTechnicalIndicators:
         """
         try:
             # 检查张量维度
-            original_shape = tensor.shape
             original_dim = tensor.dim()
-            # 确保张量是1D的
-            if original_dim > 1:
-                tensor = tensor.squeeze()
-                logger.debug(f"将张量从 {original_shape} 转换为 {tensor.shape}")
-            # 获取滚动窗口
-            windows = rolling_window(tensor, window)
-            if windows.shape[0] > 0:
-                # 计算平均值
-                mean_values = torch.mean(windows, dim=1)
-                # 创建结果张量
-                result = torch.full_like(tensor, float('nan'))
-                result[window-1:] = mean_values
-                # 恢复原始形状
-                if original_dim > 1:
-                    result = result.view(original_shape)
-                # 降维，rolling_window后立即 squeeze(1)
-                if result.dim() == 3 and result.shape[1] == 1:
+            # 确保张量是2D [N, C]
+            if original_dim == 1:
+                tensor = tensor.unsqueeze(1)
+            n_samples, n_features = tensor.shape
+            
+            if n_samples >= window:
+                # 获取滚动窗口 [N-window+1, C, window]
+                windows = tensor.unfold(0, window, 1)
+                
+                # 对窗口维度 (dim=2) 计算平均值
+                # 结果形状 [N-window+1, C]
+                mean_values = torch.nanmean(windows, dim=2)
+                
+                # 创建结果张量 [N, C]
+                padding = torch.full((window-1, n_features), float('nan'), 
+                                     device=tensor.device, dtype=tensor.dtype)
+                result = torch.cat([padding, mean_values], dim=0)
+                
+                # 恢复原始维度
+                if original_dim == 1:
                     result = result.squeeze(1)
                 return result
             else:
-                logger.warning(f"无法为 {window} 窗口生成滚动平均值")
-                return torch.full_like(tensor, float('nan'))
+                logger.warning(f"无法为 {window} 窗口生成滚动平均值，样本数不足")
+                # 返回与输入形状相同的NaN张量
+                error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)
+                if original_dim == 1:
+                    error_result = error_result.squeeze(1)
+                return error_result
         except Exception as e:
             logger.error(f"计算滚动平均值时出错: {str(e)}")
-            return torch.full_like(tensor, float('nan'))
+            # 返回与输入形状相同的NaN张量
+            n_samples, n_features = tensor.shape if tensor.dim() == 2 else (tensor.shape[0], 1)
+            error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)
+            if original_dim == 1:
+                error_result = error_result.squeeze(1)
+            return error_result
 
     def _calculate_ewma(self, tensor, span):
         """
