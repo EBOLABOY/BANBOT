@@ -84,28 +84,20 @@ def main():
             try:
                 # 尝试使用 PyTorch 进行 GPU 加速
                 logger.info("尝试使用PyTorch进行GPU加速...")
-                
                 import torch
+                import src.features.technical_indicators
+                
                 if torch.cuda.is_available():
-                    # 尝试导入PyTorch兼容的技术指标类
-                    try:
-                        from src.features.pytorch_technical_indicators import PyTorchCompatibleTechnicalIndicators
-                        
-                        # 保存原始的TechnicalIndicators类
-                        import src.features.technical_indicators
-                        original_technical_indicators = src.features.technical_indicators.TechnicalIndicators
-                        # 替换为PyTorch兼容版本
-                        src.features.technical_indicators.TechnicalIndicators = PyTorchCompatibleTechnicalIndicators
-                        logger.info("GPU加速已启用 - 使用PyTorch (CUDA)")
-                        logger.info(f"PyTorch版本: {torch.__version__}, CUDA可用设备: {torch.cuda.device_count()}")
-                        logger.info(f"当前CUDA设备: {torch.cuda.get_device_name(0)}")
-                    except ImportError:
-                        logger.warning("找不到PyTorch兼容的技术指标类。请确保src/features/pytorch_technical_indicators.py文件存在")
-                        logger.warning("将使用CPU进行计算")
+                    logger.info("GPU加速已启用 - 使用PyTorch (CUDA)")
+                    logger.info(f"PyTorch版本: {torch.__version__}, CUDA可用设备: {torch.cuda.device_count()}")
+                    logger.info(f"当前CUDA设备: {torch.cuda.get_device_name(0)}")
+                    # 使用PyTorch的兼容层替换原始的TechnicalIndicators
                 else:
                     logger.warning("PyTorch已安装但无法检测到CUDA。请确保CUDA正确安装并被PyTorch识别")
-                    logger.warning("将使用CPU进行计算")
+                    logger.warning("将继续使用CPU版本的PyTorch技术指标计算")
             
+            except ImportError as e:
+                logger.warning(f"无法导入PyTorch或相关模块 ({str(e)})，将使用CPU计算")
             except Exception as e:
                 logger.warning(f"无法启用GPU加速: {str(e)}")
                 logger.warning("将使用CPU进行计算，如需GPU加速，请确保PyTorch能访问CUDA")

@@ -15,9 +15,8 @@ import torch
 from src.utils.logger import get_logger
 from src.utils.config import load_config
 # 从 pytorch_technical_indicators 导入 GPU 版本的指标计算类
-from src.features.pytorch_technical_indicators import PyTorchCompatibleTechnicalIndicators
+from src.features.technical_indicators import TechnicalIndicators
 from src.features.microstructure_features import MicrostructureFeatures
-from src.features.torch_utils import get_device
 
 logger = get_logger(__name__)
 
@@ -68,22 +67,19 @@ class FeatureEngineer:
         self.features_path = "data/processed/features"
         os.makedirs(self.features_path, exist_ok=True)
         
-        # 初始化特征计算器 - 使用 PyTorch 版本
-        self.tech_indicators = PyTorchCompatibleTechnicalIndicators()
+        # 初始化特征计算器 - 使用原始实现
+        self.tech_indicators = TechnicalIndicators()
         self.microstructure = MicrostructureFeatures()
         
         # 缩放器
         self.scalers = {}
         
         # GPU设备
-        self.device = get_device()
-        self.use_gpu = self.device.type == 'cuda'
+        self.device = torch.device("cpu") # 默认CPU
+        self.use_gpu = False # 默认不使用GPU
         
         logger.info(f"特征工程管道已初始化，使用设备: {self.device}")
-        if self.use_gpu:
-            logger.info("已启用GPU加速特征计算")
-        else:
-            logger.warning("未检测到可用GPU，将使用CPU计算，但使用PyTorch兼容接口")
+        logger.info(f"使用的技术指标计算器: {type(self.tech_indicators).__name__}")
     
     def compute_features(self, df, feature_groups=None):
         """
