@@ -643,7 +643,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量计算各类特征
         # 根据indicators参数计算对应的指标
@@ -673,7 +673,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量方法计算价格特征
         result_tensors = self.calculate_price_features_tensor(tensor_dict)
@@ -702,7 +702,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量方法计算交易量特征
         result_tensors = self.calculate_volume_features_tensor(tensor_dict)
@@ -731,7 +731,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量方法计算波动性特征
         result_tensors = self.calculate_volatility_features_tensor(tensor_dict)
@@ -760,7 +760,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量方法计算趋势特征
         result_tensors = self.calculate_trend_features_tensor(tensor_dict)
@@ -789,7 +789,7 @@ class PyTorchTechnicalIndicators:
         result_df = df.copy()
         
         # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df, device=self.device)
+        tensor_dict = df_to_tensor(df)
         
         # 使用张量方法计算动量特征
         result_tensors = self.calculate_momentum_features_tensor(tensor_dict)
