@@ -1,5 +1,5 @@
 """
-PyTorch 工具函数模块 - 用于GPU加速
+PyTorch 工具函数模块 - 只使用CPU
 """
 
 import torch
@@ -9,27 +9,26 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 全局设备变量
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 全局设备变量 - 强制使用CPU
+DEVICE = torch.device("cpu")
 
 def get_device():
     """
-    获取当前设备（CPU或GPU）
+    获取当前设备（始终返回CPU）
     """
     return DEVICE
 
 def set_device(device_str=None):
     """
-    设置全局设备
+    设置全局设备（忽略输入，始终使用CPU）
     
     参数:
-        device_str: 设备字符串，如 'cuda:0', 'cpu' 等
+        device_str: 设备字符串，此参数被忽略
     """
     global DEVICE
-    if device_str is None:
-        DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        DEVICE = torch.device(device_str)
+    # 强制使用CPU
+    DEVICE = torch.device("cpu")
+    logger.info("设备已强制设置为CPU")
     return DEVICE
 
 def df_to_tensor(df, columns=None):
@@ -78,7 +77,7 @@ def df_to_tensor(df, columns=None):
                     tensor = torch.tensor(
                         df[col_mapping[variant]].values.astype(np.float32), 
                         dtype=torch.float32, 
-                        device=DEVICE
+                        device=DEVICE  # 强制使用CPU
                     )
                     if tensor.dim() == 1:
                         tensor = tensor.unsqueeze(1)
@@ -95,7 +94,7 @@ def df_to_tensor(df, columns=None):
             # 从DataFrame中提取数值列
             try:
                 data_np = df[col].values.astype(np.float32)
-                tensor = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)
+                tensor = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)  # 强制使用CPU
                 if tensor.dim() == 1:
                     tensor = tensor.unsqueeze(1)
                 tensor_dict[col] = tensor
@@ -125,9 +124,6 @@ def tensor_to_df(tensor, columns, index=None):
     返回:
         pandas DataFrame
     """
-    # 确保张量在CPU上
-    if tensor.is_cuda:
-        tensor = tensor.cpu()
     # 如果是[N, 1]，则squeeze为一维
     if tensor.dim() == 2 and tensor.shape[1] == 1:
         tensor = tensor.squeeze(1)
@@ -174,7 +170,7 @@ def moving_average(tensor, window_size, weights=None):
     """
     original_dim = tensor.dim()
     if isinstance(tensor, np.ndarray):
-        tensor = torch.tensor(tensor, dtype=torch.float32, device=DEVICE)
+        tensor = torch.tensor(tensor, dtype=torch.float32, device=DEVICE)  # 使用CPU
     # 确保输入是2D [N, C]
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(1)
@@ -187,7 +183,7 @@ def moving_average(tensor, window_size, weights=None):
         windows = torch.where(nan_mask, torch.zeros_like(windows), windows)
         
         if weights is not None:
-            weights = weights.to(DEVICE)
+            weights = weights.to(DEVICE)  # 确保权重在CPU上
             # weights 形状 [window_size], 调整为 [1, 1, window_size] 进行广播
             ma = torch.sum(windows * weights.view(1, 1, -1), dim=2) / torch.sum(weights)
             # ma 形状 [N-window_size+1, C]
@@ -196,7 +192,7 @@ def moving_average(tensor, window_size, weights=None):
             ma = torch.nanmean(windows, dim=2)
             # ma 形状 [N-window_size+1, C]
             
-        result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)  # 使用CPU
         result[window_size-1:] = ma
         # 恢复原始维度
         if original_dim == 1:
@@ -206,7 +202,7 @@ def moving_average(tensor, window_size, weights=None):
     except Exception as e:
         logger.error(f"moving_average计算错误: {str(e)}")
         # 发生错误时返回与输入形状相同的NaN张量
-        error_result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        error_result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)  # 使用CPU
         if original_dim == 1:
             error_result = error_result.squeeze(1)
         return error_result
@@ -226,7 +222,7 @@ def ewma(tensor, span, adjust=False):
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(1)
     alpha = 2.0 / (span + 1.0)
-    result = torch.zeros_like(tensor)
+    result = torch.zeros_like(tensor, device=DEVICE)  # 确保在CPU上
     result[0] = tensor[0]
     for i in range(1, len(tensor)):
         mask = ~torch.isnan(tensor[i])
@@ -262,6 +258,6 @@ def correlation(x, y, window_size):
     y_std = torch.sqrt(torch.nanmean((y_windows - y_mean)**2, dim=1))
     corr = cov / (x_std * y_std)
     corr = torch.where(torch.isnan(corr) | torch.isinf(corr), torch.zeros_like(corr), corr)
-    result = torch.full((x.shape[0], x.shape[1]), float('nan'), device=DEVICE)
+    result = torch.full((x.shape[0], x.shape[1]), float('nan'), device=DEVICE)  # 使用CPU
     result[window_size-1:] = corr
     return result 

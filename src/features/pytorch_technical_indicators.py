@@ -32,7 +32,7 @@ def match_shape(a, b):
 
 class PyTorchTechnicalIndicators:
     """
-    使用PyTorch实现的技术指标计算类，充分利用GPU加速
+    使用PyTorch实现的技术指标计算类，使用CPU计算
     Includes both DataFrame-based methods (for compatibility/ease of use)
     and tensor-based methods (for optimized data flow).
     """
@@ -41,8 +41,8 @@ class PyTorchTechnicalIndicators:
         """
         初始化技术指标计算器
         """
-        self.device = get_device()
-        logger.info(f"PyTorch技术指标计算器初始化，使用设备: {self.device}")
+        self.device = get_device()  # 已修改为只返回CPU
+        logger.info(f"PyTorch技术指标计算器初始化，使用CPU设备")
         self.default_windows = [5, 10, 20, 30, 50] # 添加默认窗口大小列表
 
     # --- Helper Functions ---
@@ -62,9 +62,7 @@ class PyTorchTechnicalIndicators:
                 logger.warning(f"跳过非张量结果: {name}")
                 continue
 
-            # Ensure tensor is on CPU and 1D/2D for conversion
-            if tensor.is_cuda:
-                tensor = tensor.cpu()
+            # Ensure tensor is 1D/2D for conversion
             if tensor.dim() > 2:
                 logger.warning(f"张量 {name} 维度 > 2，无法添加到 DataFrame，跳过。")
                 continue
@@ -73,7 +71,6 @@ class PyTorchTechnicalIndicators:
                 tensor = tensor.flatten() # Flatten if it's multi-column 2D
             elif tensor.dim() == 2:
                  tensor = tensor.squeeze() # Make 1D if it's [N, 1]
-
 
             try:
                 numpy_data = tensor.numpy()
@@ -324,7 +321,7 @@ class PyTorchTechnicalIndicators:
         volume_decrease = volume < torch.roll(volume, shifts=1, dims=0)
         volume_decrease[0] = False # First value doesn't decrease
 
-        # Iterative calculation (can be slow on GPU for long series)
+        # Iterative calculation (can be slow for long series)
         # Consider optimized implementation if performance critical
         for i in range(1, len(nvi)):
             if volume_decrease[i]:
@@ -694,7 +691,7 @@ class PyTorchTechnicalIndicators:
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
-                                    device=tensor.device, dtype=tensor.dtype)
+                                    device=self.device, dtype=tensor.dtype)  # 使用CPU
                 result = torch.cat([padding, stds], dim=0)
                 
                 # 恢复原始维度
@@ -738,7 +735,7 @@ class PyTorchTechnicalIndicators:
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
-                                    device=tensor.device, dtype=tensor.dtype)
+                                    device=self.device, dtype=tensor.dtype)  # 使用CPU
                 result = torch.cat([padding, max_values], dim=0)
                 
                 # 恢复原始维度
@@ -782,7 +779,7 @@ class PyTorchTechnicalIndicators:
                 
                 # 为前window-1个元素填充NaN值
                 padding = torch.full((window-1, features), float('nan'), 
-                                    device=tensor.device, dtype=tensor.dtype)
+                                    device=self.device, dtype=tensor.dtype)  # 使用CPU
                 result = torch.cat([padding, min_values], dim=0)
                 
                 # 恢复原始维度
@@ -796,7 +793,7 @@ class PyTorchTechnicalIndicators:
         except Exception as e:
             logger.error(f"计算滚动最小值时出错: {str(e)}")
             return None
-
+            
     def _calculate_rolling_mean(self, tensor, window):
         """
         计算张量的滚动平均值
@@ -824,7 +821,7 @@ class PyTorchTechnicalIndicators:
                 
                 # 创建结果张量 [N, C]
                 padding = torch.full((window-1, n_features), float('nan'), 
-                                     device=tensor.device, dtype=tensor.dtype)
+                                     device=self.device, dtype=tensor.dtype)  # 使用CPU
                 result = torch.cat([padding, mean_values], dim=0)
                 
                 # 恢复原始维度
@@ -834,7 +831,7 @@ class PyTorchTechnicalIndicators:
             else:
                 logger.warning(f"无法为 {window} 窗口生成滚动平均值，样本数不足")
                 # 返回与输入形状相同的NaN张量
-                error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)
+                error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)  # 使用CPU
                 if original_dim == 1:
                     error_result = error_result.squeeze(1)
                 return error_result
@@ -842,7 +839,7 @@ class PyTorchTechnicalIndicators:
             logger.error(f"计算滚动平均值时出错: {str(e)}")
             # 返回与输入形状相同的NaN张量
             n_samples, n_features = tensor.shape if tensor.dim() == 2 else (tensor.shape[0], 1)
-            error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)
+            error_result = torch.full((n_samples, n_features), float('nan'), device=self.device)  # 使用CPU
             if original_dim == 1:
                 error_result = error_result.squeeze(1)
             return error_result
@@ -872,7 +869,7 @@ class PyTorchTechnicalIndicators:
             ema = ewma(tensor, span=span, adjust=False)
             
             # 创建结果张量
-            result = torch.full_like(tensor, float('nan'))
+            result = torch.full_like(tensor, float('nan'), device=self.device)  # 使用CPU
             result[span-1:] = ema
             
             # 恢复原始形状
@@ -886,7 +883,7 @@ class PyTorchTechnicalIndicators:
             return result
         except Exception as e:
             logger.error(f"计算指数移动平均值时出错: {str(e)}")
-            return torch.full_like(tensor, float('nan'))
+            return torch.full_like(tensor, float('nan'), device=self.device)  # 使用CPU
 
     # --- Original DataFrame-based Methods (kept for compatibility or potential CPU fallback) ---
 
@@ -1276,7 +1273,7 @@ class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
     
     def __init__(self):
         super().__init__()
-        logger.info("初始化 PyTorch 兼容的技术指标类 - 使用GPU加速")
+        logger.info("初始化 PyTorch 兼容的技术指标类 - 使用CPU计算")
         
     # 静态方法模拟原始 TechnicalIndicators 的静态方法
     @staticmethod
