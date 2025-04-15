@@ -634,25 +634,92 @@ class PyTorchTechnicalIndicators:
     def calculate_indicators(self, df, indicators=None, window_sizes=None):
         """
         计算技术指标，PyTorch版 (DataFrame based)
+        
+        参数:
+            df: DataFrame对象，包含OHLCV数据
+            indicators: 要计算的指标列表，默认为None表示计算所有指标
+            window_sizes: 窗口大小字典，用于覆盖默认窗口大小
+            
+        返回:
+            包含技术指标的DataFrame
         """
         if df is None or df.empty:
             logger.warning("无法计算空数据的技术指标")
             return df
             
+        start_time = time.time()
+        
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
+        # 将DataFrame转换为张量字典，确保列名映射正确
+        col_mapping = {
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'volume': 'volume'
+        }
+        
+        # 查找实际的列名
+        actual_cols = {}
+        for standard_col, default_name in col_mapping.items():
+            for col in df.columns:
+                if col.lower() == default_name:
+                    actual_cols[standard_col] = col
+                    break
+            # 如果没找到，保留默认名称
+            if standard_col not in actual_cols:
+                actual_cols[standard_col] = default_name
+                
         # 将DataFrame转换为张量字典
         tensor_dict = df_to_tensor(df)
         
-        # 使用张量计算各类特征
-        # 根据indicators参数计算对应的指标
-        # 默认情况下计算基本的技术指标
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        for standard_col, actual_col in actual_cols.items():
+            if actual_col in tensor_dict:
+                mapped_tensor_dict[standard_col] = tensor_dict[actual_col]
+        
+        # 根据indicators参数决定计算哪些指标
+        all_indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
+        if indicators is None:
+            indicators = all_indicators
+        
+        # 计算各类特征
+        result_tensors = {}
+        
+        if 'price' in indicators:
+            logger.debug("计算价格特征...")
+            price_features = self.calculate_price_features_tensor(mapped_tensor_dict)
+            result_tensors.update(price_features)
+            
+        if 'volume' in indicators and 'volume' in mapped_tensor_dict:
+            logger.debug("计算交易量特征...")
+            volume_features = self.calculate_volume_features_tensor(mapped_tensor_dict)
+            result_tensors.update(volume_features)
+            
+        if 'volatility' in indicators:
+            logger.debug("计算波动性特征...")
+            volatility_features = self.calculate_volatility_features_tensor(mapped_tensor_dict)
+            result_tensors.update(volatility_features)
+            
+        if 'trend' in indicators:
+            logger.debug("计算趋势特征...")
+            trend_features = self.calculate_trend_features_tensor(mapped_tensor_dict)
+            result_tensors.update(trend_features)
+            
+        if 'momentum' in indicators:
+            logger.debug("计算动量特征...")
+            momentum_features = self.calculate_momentum_features_tensor(mapped_tensor_dict)
+            result_tensors.update(momentum_features)
         
         # 将结果添加回DataFrame
-        result_df = self._add_results_to_df(result_df, tensor_dict)
+        result_df = self._add_results_to_df(result_df, result_tensors)
         
-        logger.info(f"已计算技术指标 (PyTorch版)")
+        end_time = time.time()
+        calculation_time = end_time - start_time
+        logger.info(f"已计算技术指标 (PyTorch版): {', '.join(indicators)} (耗时: {calculation_time:.2f}秒)")
         return result_df
     
     def calculate_price_features(self, df):
@@ -672,11 +739,27 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典
+        # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        # 尝试匹配常见的列命名
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'open' in col_lower:
+                mapped_tensor_dict['open'] = tensor_dict[col]
+            elif 'high' in col_lower:
+                mapped_tensor_dict['high'] = tensor_dict[col]
+            elif 'low' in col_lower:
+                mapped_tensor_dict['low'] = tensor_dict[col]
+            elif 'close' in col_lower:
+                mapped_tensor_dict['close'] = tensor_dict[col]
+            elif 'volume' in col_lower:
+                mapped_tensor_dict['volume'] = tensor_dict[col]
+        
         # 使用张量方法计算价格特征
-        result_tensors = self.calculate_price_features_tensor(tensor_dict)
+        result_tensors = self.calculate_price_features_tensor(mapped_tensor_dict)
         
         # 将计算结果添加回DataFrame
         result_df = self._add_results_to_df(result_df, result_tensors)
@@ -701,11 +784,27 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典
+        # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        # 尝试匹配常见的列命名
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'open' in col_lower:
+                mapped_tensor_dict['open'] = tensor_dict[col]
+            elif 'high' in col_lower:
+                mapped_tensor_dict['high'] = tensor_dict[col]
+            elif 'low' in col_lower:
+                mapped_tensor_dict['low'] = tensor_dict[col]
+            elif 'close' in col_lower:
+                mapped_tensor_dict['close'] = tensor_dict[col]
+            elif 'volume' in col_lower:
+                mapped_tensor_dict['volume'] = tensor_dict[col]
+        
         # 使用张量方法计算交易量特征
-        result_tensors = self.calculate_volume_features_tensor(tensor_dict)
+        result_tensors = self.calculate_volume_features_tensor(mapped_tensor_dict)
         
         # 将计算结果添加回DataFrame
         result_df = self._add_results_to_df(result_df, result_tensors)
@@ -730,11 +829,27 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典
+        # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        # 尝试匹配常见的列命名
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'open' in col_lower:
+                mapped_tensor_dict['open'] = tensor_dict[col]
+            elif 'high' in col_lower:
+                mapped_tensor_dict['high'] = tensor_dict[col]
+            elif 'low' in col_lower:
+                mapped_tensor_dict['low'] = tensor_dict[col]
+            elif 'close' in col_lower:
+                mapped_tensor_dict['close'] = tensor_dict[col]
+            elif 'volume' in col_lower:
+                mapped_tensor_dict['volume'] = tensor_dict[col]
+        
         # 使用张量方法计算波动性特征
-        result_tensors = self.calculate_volatility_features_tensor(tensor_dict)
+        result_tensors = self.calculate_volatility_features_tensor(mapped_tensor_dict)
         
         # 将计算结果添加回DataFrame
         result_df = self._add_results_to_df(result_df, result_tensors)
@@ -759,11 +874,27 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典
+        # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        # 尝试匹配常见的列命名
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'open' in col_lower:
+                mapped_tensor_dict['open'] = tensor_dict[col]
+            elif 'high' in col_lower:
+                mapped_tensor_dict['high'] = tensor_dict[col]
+            elif 'low' in col_lower:
+                mapped_tensor_dict['low'] = tensor_dict[col]
+            elif 'close' in col_lower:
+                mapped_tensor_dict['close'] = tensor_dict[col]
+            elif 'volume' in col_lower:
+                mapped_tensor_dict['volume'] = tensor_dict[col]
+        
         # 使用张量方法计算趋势特征
-        result_tensors = self.calculate_trend_features_tensor(tensor_dict)
+        result_tensors = self.calculate_trend_features_tensor(mapped_tensor_dict)
         
         # 将计算结果添加回DataFrame
         result_df = self._add_results_to_df(result_df, result_tensors)
@@ -788,11 +919,27 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典
+        # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
+        # 映射张量字典中的键名
+        mapped_tensor_dict = {}
+        # 尝试匹配常见的列命名
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'open' in col_lower:
+                mapped_tensor_dict['open'] = tensor_dict[col]
+            elif 'high' in col_lower:
+                mapped_tensor_dict['high'] = tensor_dict[col]
+            elif 'low' in col_lower:
+                mapped_tensor_dict['low'] = tensor_dict[col]
+            elif 'close' in col_lower:
+                mapped_tensor_dict['close'] = tensor_dict[col]
+            elif 'volume' in col_lower:
+                mapped_tensor_dict['volume'] = tensor_dict[col]
+        
         # 使用张量方法计算动量特征
-        result_tensors = self.calculate_momentum_features_tensor(tensor_dict)
+        result_tensors = self.calculate_momentum_features_tensor(mapped_tensor_dict)
         
         # 将计算结果添加回DataFrame
         result_df = self._add_results_to_df(result_df, result_tensors)
