@@ -93,7 +93,7 @@ def main():
                 batch_size=args.batch_size
             )
             
-            logger.info(f"已为 {len(processed_data)} 个交易对计算特征")
+            logger.info(f"已成功处理 {processed_data} 个交易对")
         
         # 处理模式: 特征选择
         if args.mode in ["select", "all"] and args.selection_method:
