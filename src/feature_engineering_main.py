@@ -90,7 +90,6 @@ def main():
                 if accelerator.is_available():
                     logger.info("GPU加速已启用 - RAPIDS库已加载")
                     # 使用GPU兼容的技术指标类替换原有实现
-                    from src.features.feature_engineering import FeatureEngineer
                     # FeatureEngineer._orig_tech_indicators = FeatureEngineer.tech_indicators
                     # FeatureEngineer.tech_indicators = GpuCompatibleTechnicalIndicators()
                     
