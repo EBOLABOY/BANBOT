@@ -14,6 +14,21 @@ from src.features.torch_utils import get_device, df_to_tensor, tensor_to_df, mov
 
 logger = get_logger(__name__)
 
+def match_shape(a, b):
+    """
+    将张量a的形状调整为与b一致，用于安全广播。
+    """
+    if a.shape == b.shape:
+        return a
+    if a.dim() == 1 and b.dim() == 2:
+        return a.unsqueeze(1).expand_as(b)
+    if a.dim() == 2 and b.dim() == 1:
+        return a.squeeze()
+    if a.dim() == 1 and b.dim() == 1 and a.shape[0] == b.shape[0]:
+        return a
+    # 其他情况
+    return a.expand_as(b)
+
 class PyTorchTechnicalIndicators:
     """
     使用PyTorch实现的技术指标计算类，充分利用GPU加速
@@ -361,16 +376,7 @@ class PyTorchTechnicalIndicators:
                     result_tensors[col_name] = cv
                     
                     # 计算标准化波动率 = std/price
-                    # 修正：保证 rolling_std 和 close 维度一致
-                    if rolling_std.shape != close.shape:
-                        if rolling_std.dim() == 2 and close.dim() == 1:
-                            close_expanded = close.unsqueeze(1).expand_as(rolling_std)
-                        elif rolling_std.dim() == 1 and close.dim() == 2:
-                            close_expanded = close.squeeze()
-                        else:
-                            close_expanded = close.expand_as(rolling_std)
-                    else:
-                        close_expanded = close
+                    close_expanded = match_shape(close, rolling_std)
                     non_zero_mask = close_expanded != 0
                     norm_vol = torch.zeros_like(rolling_std)
                     norm_vol[non_zero_mask] = rolling_std[non_zero_mask] / close_expanded[non_zero_mask]
@@ -415,16 +421,7 @@ class PyTorchTechnicalIndicators:
                         
                         # 计算标准化ATR
                         non_zero_mask = close != 0
-                        # 修正：保证 atr 和 close 维度一致
-                        if atr.shape != close.shape:
-                            if atr.dim() == 2 and close.dim() == 1:
-                                close_expanded = close.unsqueeze(1).expand_as(atr)
-                            elif atr.dim() == 1 and close.dim() == 2:
-                                close_expanded = close.squeeze()
-                            else:
-                                close_expanded = close.expand_as(atr)
-                        else:
-                            close_expanded = close
+                        close_expanded = match_shape(close, atr)
                         mask = non_zero_mask & ~torch.isnan(atr)
                         norm_atr = torch.zeros_like(atr)
                         norm_atr[mask] = atr[mask] / close_expanded[mask]
@@ -480,16 +477,7 @@ class PyTorchTechnicalIndicators:
                     
                     # 计算价格相对于移动平均线的百分比变化
                     non_zero_mask = sma != 0
-                    # 修正：保证 sma 和 close 维度一致
-                    if sma.shape != close.shape:
-                        if sma.dim() == 2 and close.dim() == 1:
-                            close_expanded = close.unsqueeze(1).expand_as(sma)
-                        elif sma.dim() == 1 and close.dim() == 2:
-                            close_expanded = close.squeeze()
-                        else:
-                            close_expanded = close.expand_as(sma)
-                    else:
-                        close_expanded = close
+                    close_expanded = match_shape(close, sma)
                     close_to_ma = torch.zeros_like(sma)
                     close_to_ma[non_zero_mask] = (close_expanded[non_zero_mask] / sma[non_zero_mask]) - 1.0
                     
@@ -529,20 +517,8 @@ class PyTorchTechnicalIndicators:
                         price_range = rolling_max - rolling_min
                         non_zero_range = price_range > 0
                         ppo = torch.zeros_like(close)
-                        # 修正：保证 rolling_min 和 close 维度一致
-                        if rolling_min.shape != close.shape:
-                            if rolling_min.dim() == 2 and close.dim() == 1:
-                                close_expanded = close.unsqueeze(1).expand_as(rolling_min)
-                                min_expanded = rolling_min
-                            elif rolling_min.dim() == 1 and close.dim() == 2:
-                                close_expanded = close.squeeze()
-                                min_expanded = rolling_min
-                            else:
-                                close_expanded = close.expand_as(rolling_min)
-                                min_expanded = rolling_min
-                        else:
-                            close_expanded = close
-                            min_expanded = rolling_min
+                        close_expanded = match_shape(close, rolling_min)
+                        min_expanded = match_shape(rolling_min, close)
                         ppo[non_zero_range] = (close_expanded[non_zero_range] - min_expanded[non_zero_range]) / price_range[non_zero_range]
                         
                         col_name = f'ppo_{window}'
