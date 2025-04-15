@@ -143,11 +143,33 @@ class FeatureEngineer:
             result_df = self.microstructure.calculate_price_impact(result_df, window_sizes_list)
         
         # 计算技术指标（如果未在上述特征组中处理）
-        result_df = self.tech_indicators.calculate_indicators(
-            result_df, 
-            indicators=['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI'],
-            window_sizes=window_sizes_list
-        )
+        # 将技术指标名称映射到新的结构
+        indicators_mapping = {
+            'MACD': 'momentum',
+            'RSI': 'momentum',
+            'STOCH': 'momentum',
+            'BBANDS': 'volatility',
+            'ATR': 'volatility',
+            'ADX': 'trend',
+            'CCI': 'trend'
+        }
+        
+        # 获取需要计算的指标组
+        needed_groups = set()
+        for ind in ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']:
+            if indicators_mapping.get(ind) not in feature_groups:
+                needed_groups.add(indicators_mapping.get(ind))
+        
+        # 如果有需要单独计算的指标组
+        if needed_groups:
+            try:
+                result_df = self.tech_indicators.calculate_indicators(
+                    result_df, 
+                    indicators=list(needed_groups),
+                    window_sizes=None
+                )
+            except Exception as e:
+                logger.error(f"计算额外技术指标时出错: {str(e)}")
         
         logger.info(f"已计算 {len(result_df.columns) - len(df.columns)} 个特征")
         return result_df

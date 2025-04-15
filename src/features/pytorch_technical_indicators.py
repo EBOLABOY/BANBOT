@@ -966,6 +966,37 @@ class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
     def calculate_indicators(df, indicators=None, window_sizes=None):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
+        
+        # 如果传入了具体的技术指标名称（如'MACD', 'RSI'等），需要转换
+        # 因为我们的新实现使用了分类（'price', 'volume', 'volatility', 'trend', 'momentum'）
+        if indicators is not None and isinstance(indicators, list) and len(indicators) > 0 and isinstance(indicators[0], str):
+            # 检查第一个元素，如果不是我们的分类之一，则进行映射
+            first_elem = indicators[0].lower()
+            if first_elem not in ['price', 'volume', 'volatility', 'trend', 'momentum']:
+                # 创建映射，转换传统指标名称为新的分类
+                indicators_mapping = {
+                    'MACD': 'momentum',
+                    'RSI': 'momentum',
+                    'STOCH': 'momentum',
+                    'BBANDS': 'volatility',
+                    'ATR': 'volatility',
+                    'ADX': 'trend',
+                    'CCI': 'trend'
+                }
+                
+                # 将指标名称转换为分类
+                needed_groups = set()
+                for ind in indicators:
+                    if ind.upper() in indicators_mapping:
+                        needed_groups.add(indicators_mapping[ind.upper()])
+                
+                # 如果有分类，使用这些分类
+                if needed_groups:
+                    indicators = list(needed_groups)
+                else:
+                    # 如果没有匹配的分类，使用所有分类
+                    indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
+                    
         return instance.calculate_indicators(df, indicators, window_sizes)
     
     @staticmethod
