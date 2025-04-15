@@ -632,14 +632,27 @@ class FeatureEngineer:
                 if 'timestamp' in df.columns:
                     df.set_index('timestamp', inplace=True)
                 
-                # 分批处理特征计算
-                features_df = self.compute_features(df)
+                # 初始化变量
+                features_df = None
+                targets_df = None
                 
-                # 创建目标变量
-                targets_df = self.create_target_variables(features_df)
-                
-                # 预处理特征
-                features_df = self.preprocess_features(features_df)
+                try:
+                    # 分批处理特征计算
+                    features_df = self.compute_features(df)
+                    
+                    # 创建目标变量
+                    if features_df is not None:
+                        targets_df = self.create_target_variables(features_df)
+                    
+                    # 预处理特征
+                    if features_df is not None:
+                        features_df = self.preprocess_features(features_df)
+                except Exception as inner_e:
+                    logger.error(f"处理 {filepath} 特征计算阶段出错: {str(inner_e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    # 确保在特征计算错误时返回None
+                    return None, None
                 
             else:
                 # 对于较小的文件，直接读取
@@ -649,14 +662,32 @@ class FeatureEngineer:
                 if 'timestamp' in df.columns:
                     df.set_index('timestamp', inplace=True)
             
-                # 计算特征
-                features_df = self.compute_features(df)
+                # 初始化变量
+                features_df = None
+                targets_df = None
                 
-                # 创建目标变量
-                targets_df = self.create_target_variables(features_df)
-                
-                # 预处理特征
-                features_df = self.preprocess_features(features_df)
+                try:
+                    # 计算特征
+                    features_df = self.compute_features(df)
+                    
+                    # 创建目标变量
+                    if features_df is not None:
+                        targets_df = self.create_target_variables(features_df)
+                    
+                    # 预处理特征
+                    if features_df is not None:
+                        features_df = self.preprocess_features(features_df)
+                except Exception as inner_e:
+                    logger.error(f"处理 {filepath} 特征计算阶段出错: {str(inner_e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    # 确保在特征计算错误时返回None
+                    return None, None
+            
+            # 检查处理是否成功
+            if features_df is None or targets_df is None:
+                logger.warning(f"处理 {filepath} 失败，特征或目标变量为空")
+                return None, None
             
             # 将时间戳设为列而非索引，方便后续处理
             if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
