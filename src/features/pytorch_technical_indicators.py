@@ -50,7 +50,7 @@ class PyTorchCompatibleTechnicalIndicators:
         
     def compute_features(self, df, feature_groups=None):
         """
-        使用混合计算方案计算所有特征，减少数据传输
+        使用混合计算方案计算所有特征，优先使用GPU
         
         参数:
             df: DataFrame对象，包含OHLCV数据
@@ -74,93 +74,237 @@ class PyTorchCompatibleTechnicalIndicators:
         gpu_groups = []
         cpu_groups = []
         
-        for group in feature_groups:
-            if group in ['volatility', 'trend', 'momentum']:
-                gpu_groups.append(group)
-            else:
-                cpu_groups.append(group)
+        all_gpu_possible_groups = ['price_based', 'volume_based', 'volatility', 'trend', 'momentum']
+
+        if self.gpu_available:
+            # 如果GPU可用，尽可能将所有计算放到GPU
+            for group in feature_groups:
+                if group in all_gpu_possible_groups:
+                    gpu_groups.append(group)
+                else:
+                    # 其他非GPU优化的特征组（如果未来有的话）
+                    cpu_groups.append(group) 
+        else:
+            # 如果GPU不可用，所有组都在CPU计算
+            cpu_groups = feature_groups
         
         # 如果GPU可用，先将数据转换为GPU张量一次性完成，避免多次传输
         gpu_tensors = {}
+        gpu_features = {}
         if self.gpu_available and gpu_groups:
-            logger.info(f"使用GPU计算复杂特征组: {gpu_groups}")
+            logger.info(f"使用GPU计算特征组: {gpu_groups}")
             try:
                 # 一次性将所有需要的列转换为GPU张量
-                for col in ['open', 'high', 'low', 'close', 'volume']:
+                required_cols = set(['open', 'high', 'low', 'close', 'volume'])
+                # 收集所有GPU组实际需要的列
+                cols_to_load = set()
+                if any(g in gpu_groups for g in ['price_based', 'volatility', 'trend', 'momentum']):
+                    cols_to_load.update(['open', 'high', 'low', 'close'])
+                if any(g in gpu_groups for g in ['volume_based']):
+                     cols_to_load.add('volume')
+                
+                for col in cols_to_load:
                     if col in df.columns:
                         gpu_tensors[col] = torch.tensor(
                             df[col].values, 
                             dtype=torch.float32, 
                             device=self.device,
-                            pin_memory=self.torch_pin_memory
+                            pin_memory=self.torch_pin_memory # Enable if you have enough RAM
                         )
+                
                 # 一次性计算所有GPU特征
-                gpu_features = {}
                 for group in gpu_groups:
-                    if group == 'volatility':
-                        # 传递已有的GPU张量而不是DataFramc
+                    group_start_time = time.time()
+                    if group == 'price_based':
+                        gpu_features.update(self._gpu_calculate_price_features(df, gpu_tensors))
+                    elif group == 'volume_based':
+                         gpu_features.update(self._gpu_calculate_volume_features(df, gpu_tensors))
+                    elif group == 'volatility':
                         gpu_features.update(self._gpu_calculate_volatility_features(df, gpu_tensors))
                     elif group == 'trend':
                         gpu_features.update(self._gpu_calculate_trend_features(df, gpu_tensors))
                     elif group == 'momentum':
                         gpu_features.update(self._gpu_calculate_momentum_features(df, gpu_tensors))
-                
+                    logger.debug(f"GPU group '{group}' calculation finished in {time.time() - group_start_time:.2f}s")
+
                 # 将计算结果一次性添加到结果DataFrame
                 for feature_name, feature_data in gpu_features.items():
-                    result_df[feature_name] = feature_data
+                    # 确保列名唯一，避免覆盖
+                    if feature_name not in result_df.columns:
+                         result_df[feature_name] = feature_data
+                    else:
+                         logger.warning(f"GPU feature '{feature_name}' already exists in DataFrame, skipping.")
+
             except Exception as e:
-                logger.error(f"GPU计算出错，回退到CPU: {e}")
+                import traceback
+                logger.error(f"GPU计算出错: {e}\n{traceback.format_exc()}")
                 # 将出错的特征组添加到CPU计算
+                logger.warning(f"GPU calculation failed. Falling back to CPU for groups: {gpu_groups}")
                 cpu_groups.extend(gpu_groups)
-                gpu_groups = []
+                gpu_groups = [] # Reset GPU groups as calculation failed
         
-        # 使用CPU并行计算简单特征
+        # 使用CPU并行计算剩余的特征组（或因GPU失败而回退的组）
         if cpu_groups:
-            logger.info(f"使用CPU计算简单特征组: {cpu_groups}")
+            logger.info(f"使用CPU计算特征组: {cpu_groups}")
             # 使用线程池并行计算CPU特征
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_cpu_workers) as executor:
-                futures = []
+                futures = {}
                 
                 # 为每个CPU特征组创建future
                 for group in cpu_groups:
                     if group == 'price_based':
-                        futures.append(executor.submit(self._cpu_calculate_price_features, df.copy()))
+                        futures[executor.submit(self._cpu_calculate_price_features, df.copy())] = group
                     elif group == 'volume_based':
-                        futures.append(executor.submit(self._cpu_calculate_volume_features, df.copy()))
+                        futures[executor.submit(self._cpu_calculate_volume_features, df.copy())] = group
                     elif group == 'volatility':
-                        futures.append(executor.submit(self._cpu_calculate_volatility_features, df.copy()))
+                        futures[executor.submit(self._cpu_calculate_volatility_features, df.copy())] = group
                     elif group == 'trend':
-                        futures.append(executor.submit(self._cpu_calculate_trend_features, df.copy()))
+                        futures[executor.submit(self._cpu_calculate_trend_features, df.copy())] = group
                     elif group == 'momentum':
-                        futures.append(executor.submit(self._cpu_calculate_momentum_features, df.copy()))
+                        futures[executor.submit(self._cpu_calculate_momentum_features, df.copy())] = group
+                    # Add other potential CPU groups here
                 
                 # 合并所有CPU计算结果
                 for future in concurrent.futures.as_completed(futures):
+                    group_name = futures[future]
                     try:
                         cpu_result = future.result()
                         # 只合并新增的特征列
                         new_cols = [col for col in cpu_result.columns if col not in df.columns]
-                        result_df[new_cols] = cpu_result[new_cols]
+                        # Add results to the main DataFrame, check for duplicates
+                        for col in new_cols:
+                             if col not in result_df.columns:
+                                 result_df[col] = cpu_result[col]
+                             else:
+                                 logger.warning(f"CPU feature '{col}' (from group '{group_name}') already exists, skipping.")
                     except Exception as e:
-                        logger.error(f"CPU特征计算出错: {str(e)}")
+                        import traceback
+                        logger.error(f"CPU特征计算组 '{group_name}' 出错: {str(e)}\n{traceback.format_exc()}")
         
         # 清理GPU内存
         if self.gpu_available:
+            del gpu_tensors # Explicitly delete tensor dict
+            del gpu_features
             torch.cuda.empty_cache()
         
         logger.info(f"特征计算完成，耗时: {time.time() - start_time:.2f}秒")
         return result_df
-    
-    def _cpu_calculate_price_features(self, df):
-        """在CPU上计算价格相关特征"""
-        from src.features.technical_indicators import TechnicalIndicators
-        return TechnicalIndicators.calculate_price_features(df)
-    
-    def _cpu_calculate_volume_features(self, df):
-        """在CPU上计算交易量相关特征"""
-        from src.features.technical_indicators import TechnicalIndicators
-        return TechnicalIndicators.calculate_volume_features(df)
-    
+
+    def _gpu_calculate_price_features(self, df, tensors):
+        """GPU优化的价格特征计算"""
+        features = {}
+        logger.debug("Starting GPU price feature calculation...")
+        
+        close = tensors.get('close')
+        open_price = tensors.get('open')
+        high = tensors.get('high')
+        low = tensors.get('low')
+
+        if close is None or open_price is None or high is None or low is None:
+            logger.warning("计算价格特征需要 open, high, low, close 数据，但未全部提供")
+            return features
+
+        # 计算价格变化百分比
+        price_change = torch.zeros_like(close)
+        price_change[1:] = (close[1:] - close[:-1]) / (close[:-1] + 1e-10) # Add epsilon for stability
+        features['price_change_pct'] = price_change.cpu().numpy()
+        
+        # 计算价格差异指标
+        price_gap = (high - low) / (low + 1e-10)
+        features['price_gap'] = price_gap.cpu().numpy()
+        
+        # 计算开盘-收盘差异
+        open_close_diff = (close - open_price) / (open_price + 1e-10)
+        features['open_close_diff'] = open_close_diff.cpu().numpy()
+        
+        # 计算最高-最低差异
+        high_low_diff = (high - low) / (low + 1e-10)
+        features['high_low_diff'] = high_low_diff.cpu().numpy()
+        
+        # 计算当前价格相对近期高低点的位置 (使用卷积实现rolling max/min)
+        for window in [5, 10, 20, 50]:
+            # Ensure window size is not larger than tensor length
+            if window > len(high): continue 
+            
+            # Rolling max using conv1d trick (max = -avg_pool(-x))
+            neg_high = -high.view(1, 1, -1)
+            padded_neg_high = torch.nn.functional.pad(neg_high, (window-1, 0), 'constant', -torch.inf)
+            rolling_max_high = -torch.nn.functional.avg_pool1d(padded_neg_high, kernel_size=window, stride=1).view(-1) * window # Undo avg
+            
+            # Rolling min using avg_pool1d
+            low_view = low.view(1, 1, -1)
+            padded_low = torch.nn.functional.pad(low_view, (window-1, 0), 'constant', torch.inf)
+            rolling_min_low = torch.nn.functional.avg_pool1d(padded_low, kernel_size=window, stride=1).view(-1) # Avg pool is fine for min
+
+            # Align lengths if necessary due to padding
+            if len(rolling_max_high) > len(close): rolling_max_high = rolling_max_high[len(rolling_max_high)-len(close):]
+            if len(rolling_min_low) > len(close): rolling_min_low = rolling_min_low[len(rolling_min_low)-len(close):]
+
+            price_rel_high = close / (rolling_max_high + 1e-10)
+            price_rel_low = close / (rolling_min_low + 1e-10)
+            
+            features[f'price_rel_high_{window}'] = price_rel_high.cpu().numpy()
+            features[f'price_rel_low_{window}'] = price_rel_low.cpu().numpy()
+        
+        # 计算价格波动性 (滚动标准差)
+        window_vol = 20
+        if window_vol <= len(price_change):
+             # Use conv1d to calculate rolling std more efficiently
+             price_change_view = price_change.view(1, 1, -1)
+             # Rolling mean
+             weights = torch.ones(1, 1, window_vol, device=self.device) / window_vol
+             padded_pc = torch.nn.functional.pad(price_change_view, (window_vol-1, 0), 'constant', 0)
+             rolling_mean_pc = torch.nn.functional.conv1d(padded_pc, weights).view(-1)
+             # Rolling variance
+             squared_diff_pc = ((price_change_view - rolling_mean_pc.view(1, 1, -1))**2).view(1, 1, -1)
+             padded_sq_diff_pc = torch.nn.functional.pad(squared_diff_pc, (window_vol-1, 0), 'constant', 0)
+             rolling_variance_pc = torch.nn.functional.conv1d(padded_sq_diff_pc, weights).view(-1)
+             rolling_std_pc = torch.sqrt(rolling_variance_pc + 1e-10) # Add epsilon
+
+             # Align lengths
+             if len(rolling_std_pc) > len(close): rolling_std_pc = rolling_std_pc[len(rolling_std_pc)-len(close):]
+             
+             features['price_volatility'] = rolling_std_pc.cpu().numpy()
+        else:
+             features['price_volatility'] = np.full(len(close), np.nan)
+
+
+        logger.debug("Finished GPU price feature calculation.")
+        return features
+
+    def _gpu_calculate_volume_features(self, df, tensors):
+        """GPU优化的交易量特征计算"""
+        features = {}
+        logger.debug("Starting GPU volume feature calculation...")
+
+        volume = tensors.get('volume')
+        if volume is None:
+             logger.warning("计算交易量特征需要 volume 数据，但未提供")
+             return features
+
+        # 计算交易量变化百分比
+        volume_change = torch.zeros_like(volume)
+        volume_change[1:] = (volume[1:] - volume[:-1]) / (volume[:-1] + 1e-10) # Add epsilon
+        features['volume_change_pct'] = volume_change.cpu().numpy()
+
+        # 计算相对交易量 (相对于近期平均值) - 使用卷积
+        for window in [5, 10, 20, 50]:
+             if window > len(volume): continue
+             
+             weights = torch.ones(1, 1, window, device=self.device) / window
+             volume_view = volume.view(1, 1, -1)
+             padded_volume = torch.nn.functional.pad(volume_view, (window-1, 0), 'constant', 0)
+             rolling_mean_volume = torch.nn.functional.conv1d(padded_volume, weights).view(-1)
+             
+             # Align lengths
+             if len(rolling_mean_volume) > len(close): rolling_mean_volume = rolling_mean_volume[len(rolling_mean_volume)-len(close):]
+
+             relative_volume = volume / (rolling_mean_volume + 1e-10) # Add epsilon
+             features[f'rel_volume_{window}'] = relative_volume.cpu().numpy()
+
+        logger.debug("Finished GPU volume feature calculation.")
+        return features
+
     def _gpu_calculate_volatility_features(self, df, tensors=None):
         """GPU优化的波动性特征计算，复用已有的GPU张量避免重复传输"""
         features = {}
@@ -223,6 +367,16 @@ class PyTorchCompatibleTechnicalIndicators:
         # ...假设的实现内容...
         features = {}
         return features
+
+    def _cpu_calculate_price_features(self, df):
+        """在CPU上计算价格相关特征"""
+        from src.features.technical_indicators import TechnicalIndicators
+        return TechnicalIndicators.calculate_price_features(df)
+    
+    def _cpu_calculate_volume_features(self, df):
+        """在CPU上计算交易量相关特征"""
+        from src.features.technical_indicators import TechnicalIndicators
+        return TechnicalIndicators.calculate_volume_features(df)
 
     def _cpu_calculate_volatility_features(self, df):
         """CPU优化的波动性特征计算"""
