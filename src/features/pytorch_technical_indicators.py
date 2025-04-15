@@ -1011,36 +1011,67 @@ class PyTorchTechnicalIndicators:
             logger.warning("无法计算空数据的价格特征")
             return df
         
-        # 创建副本，避免修改原始数据
-            result_df = df.copy()
+        # 创建副本，并备份原始DataFrame
+        result_df = df.copy()
+        original_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典，并映射列名
+            try:
+                tensor_dict = df_to_tensor(df)
+            except Exception as e:
+                logger.error(f"DataFrame转张量时出错: {str(e)}")
+                return original_df # 转换失败则返回原始数据
             
-        # 将DataFrame转换为张量字典，并映射列名
-        tensor_dict = df_to_tensor(df)
-        
-        # 映射张量字典中的键名
-        mapped_tensor_dict = {}
-        # 尝试匹配常见的列命名
-        for col in df.columns:
-            col_lower = col.lower()
-            if 'open' in col_lower:
-                mapped_tensor_dict['open'] = tensor_dict[col]
-            elif 'high' in col_lower:
-                mapped_tensor_dict['high'] = tensor_dict[col]
-            elif 'low' in col_lower:
-                mapped_tensor_dict['low'] = tensor_dict[col]
-            elif 'close' in col_lower:
-                mapped_tensor_dict['close'] = tensor_dict[col]
-            elif 'volume' in col_lower:
-                mapped_tensor_dict['volume'] = tensor_dict[col]
-        
-        # 使用张量方法计算价格特征
-        result_tensors = self.calculate_price_features_tensor(mapped_tensor_dict)
-        
-        # 将计算结果添加回DataFrame
-        result_df = self._add_results_to_df(result_df, result_tensors)
-        
-        logger.info("已计算价格特征 (PyTorch版)")
-        return result_df
+            # 映射张量字典中的键名
+            try:
+                mapped_tensor_dict = {}
+                # 尝试匹配常见的列命名
+                for col in df.columns:
+                    col_lower = col.lower()
+                    if 'open' in col_lower:
+                        mapped_tensor_dict['open'] = tensor_dict[col]
+                    elif 'high' in col_lower:
+                        mapped_tensor_dict['high'] = tensor_dict[col]
+                    elif 'low' in col_lower:
+                        mapped_tensor_dict['low'] = tensor_dict[col]
+                    elif 'close' in col_lower:
+                        mapped_tensor_dict['close'] = tensor_dict[col]
+                    elif 'volume' in col_lower:
+                        mapped_tensor_dict['volume'] = tensor_dict[col]
+            except Exception as e:
+                logger.error(f"映射张量键名时出错: {str(e)}")
+                return original_df # 映射失败则返回原始数据
+            
+            # 使用张量方法计算价格特征
+            try:
+                result_tensors = self.calculate_price_features_tensor(mapped_tensor_dict)
+                if not result_tensors:
+                    logger.warning("价格特征张量计算返回空结果")
+                    return original_df # 张量计算失败返回原始数据
+            except Exception as e:
+                logger.error(f"计算价格特征张量时出错: {str(e)}")
+                return original_df # 张量计算失败返回原始数据
+            
+            # 将计算结果添加回DataFrame
+            try:
+                result_df = self._add_results_to_df(result_df, result_tensors)
+                if result_df is None or result_df.empty:
+                     logger.warning("添加特征到DataFrame后结果为空")
+                     return original_df # 添加失败返回原始数据
+            except Exception as e:
+                logger.error(f"添加价格特征到DataFrame时出错: {str(e)}")
+                return original_df # 添加失败返回原始数据
+            
+            logger.info("已计算价格特征 (PyTorch版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"计算价格特征过程中发生意外错误: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # 兜底返回原始DataFrame副本
+            return original_df
     
     def calculate_volume_features(self, df):
         """
