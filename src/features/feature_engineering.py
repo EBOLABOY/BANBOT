@@ -14,7 +14,8 @@ import torch
 
 from src.utils.logger import get_logger
 from src.utils.config import load_config
-from src.features.technical_indicators import TechnicalIndicators
+# 从 pytorch_technical_indicators 导入 GPU 版本的指标计算类
+from src.features.pytorch_technical_indicators import PyTorchCompatibleTechnicalIndicators
 from src.features.microstructure_features import MicrostructureFeatures
 from src.features.torch_utils import get_device
 
@@ -67,8 +68,8 @@ class FeatureEngineer:
         self.features_path = "data/processed/features"
         os.makedirs(self.features_path, exist_ok=True)
         
-        # 初始化特征计算器
-        self.tech_indicators = TechnicalIndicators()
+        # 初始化特征计算器 - 使用 PyTorch 版本
+        self.tech_indicators = PyTorchCompatibleTechnicalIndicators()
         self.microstructure = MicrostructureFeatures()
         
         # 缩放器
@@ -78,7 +79,11 @@ class FeatureEngineer:
         self.device = get_device()
         self.use_gpu = self.device.type == 'cuda'
         
-        logger.info("特征工程管道已初始化")
+        logger.info(f"特征工程管道已初始化，使用设备: {self.device}")
+        if self.use_gpu:
+            logger.info("已启用GPU加速特征计算")
+        else:
+            logger.warning("未检测到可用GPU，将使用CPU计算，但使用PyTorch兼容接口")
     
     def compute_features(self, df, feature_groups=None):
         """
@@ -634,15 +639,15 @@ class FeatureEngineer:
                 # 设置时间戳为索引
                 if 'timestamp' in df.columns:
                     df.set_index('timestamp', inplace=True)
-                
-                # 计算特征
-                features_df = self.compute_features(df)
-                
-                # 创建目标变量
-                targets_df = self.create_target_variables(features_df)
-                
-                # 预处理特征
-                features_df = self.preprocess_features(features_df)
+            
+            # 计算特征
+            features_df = self.compute_features(df)
+            
+            # 创建目标变量
+            targets_df = self.create_target_variables(features_df)
+            
+            # 预处理特征
+            features_df = self.preprocess_features(features_df)
             
             # 将时间戳设为列而非索引，方便后续处理
             if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
