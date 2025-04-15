@@ -28,15 +28,16 @@ def parse_args():
                       help="操作模式: compute=仅计算特征, select=仅进行特征选择, all=计算并选择特征")
     
     # 数据参数
-    parser.add_argument("--symbols", type=str, nargs="+", help="要处理的交易对列表，例如BTC/USDT ETH/USDT")
-    parser.add_argument("--timeframes", type=str, nargs="+", help="要处理的时间框架列表, 例如1m 5m 1h")
+    parser.add_argument("--symbols", type=str, nargs='+', help="要处理的交易对列表，例如BTC/USDT ETH/USDT")
+    parser.add_argument("--timeframes", type=str, nargs='+', help="要处理的时间框架列表, 例如1m 5m 1h")
     parser.add_argument("--start_date", type=str, help="起始日期 (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, help="截止日期 (YYYY-MM-DD)")
     parser.add_argument("--data_dir", type=str, default="data/processed/merged", help="原始数据目录")
     
     # 特征计算参数
-    parser.add_argument("--feature_groups", type=str, nargs="+", 
+    parser.add_argument("--feature_groups", type=str, nargs='+', 
                       help="要计算的特征组，例如 price_based volume_based volatility trend momentum market_microstructure")
+    parser.add_argument("--batch_size", type=int, default=None, help="手动指定一次处理的数据行数（批次大小）")
     
     # 特征选择参数
     parser.add_argument("--selection_method", type=str, 
@@ -52,10 +53,6 @@ def parse_args():
     # 输出参数
     parser.add_argument("--output_dir", type=str, default="data/processed/features", 
                       help="输出特征目录")
-    
-    # GPU加速参数
-    parser.add_argument("--use_gpu", action="store_true", help="使用GPU加速计算特征")
-    parser.add_argument("--batch_size", type=int, default=500000, help="GPU处理的批次大小，用于避免GPU内存不足")
     
     # 其他参数
     parser.add_argument("--verbose", action="store_true", help="显示详细日志")
@@ -79,38 +76,12 @@ def main():
         # 加载配置
         config = load_config(args.config)
         
-        # 如果启用GPU，导入GPU支持模块并配置
-        if args.use_gpu:
-            try:
-                # 尝试使用 PyTorch 进行 GPU 加速
-                logger.info("尝试使用PyTorch进行GPU加速...")
-                import torch
-                import src.features.technical_indicators
-                
-                if torch.cuda.is_available():
-                    logger.info("GPU加速已启用 - 使用PyTorch (CUDA)")
-                    logger.info(f"PyTorch版本: {torch.__version__}, CUDA可用设备: {torch.cuda.device_count()}")
-                    logger.info(f"当前CUDA设备: {torch.cuda.get_device_name(0)}")
-                    # 使用PyTorch的兼容层替换原始的TechnicalIndicators
-                else:
-                    logger.warning("PyTorch已安装但无法检测到CUDA。请确保CUDA正确安装并被PyTorch识别")
-                    logger.warning("将继续使用CPU版本的PyTorch技术指标计算")
-            
-            except ImportError as e:
-                logger.warning(f"无法导入PyTorch或相关模块 ({str(e)})，将使用CPU计算")
-            except Exception as e:
-                logger.warning(f"无法启用GPU加速: {str(e)}")
-                logger.warning("将使用CPU进行计算，如需GPU加速，请确保PyTorch能访问CUDA")
-        
         # 创建特征工程器
         feature_engineer = FeatureEngineer(args.config)
         
         # 处理模式: 计算特征
         if args.mode in ["compute", "all"]:
             logger.info("开始计算特征...")
-            
-            # GPU处理的批量大小
-            batch_size = args.batch_size if args.use_gpu else None
             
             # 处理所有交易对的数据
             processed_data = feature_engineer.process_all_data(
@@ -119,7 +90,7 @@ def main():
                 start_date=args.start_date,
                 end_date=args.end_date,
                 data_dir=args.data_dir,
-                batch_size=batch_size
+                batch_size=args.batch_size
             )
             
             logger.info(f"已为 {len(processed_data)} 个交易对计算特征")
