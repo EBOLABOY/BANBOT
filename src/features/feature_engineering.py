@@ -106,107 +106,166 @@ class FeatureEngineer:
         
         # 创建副本，避免修改原始数据
         result_df = df.copy()
+        # 备份原始DataFrame，确保在任何情况下都能返回有效结果
+        original_df = df.copy()
         
         # 转换窗口大小为列表
-        window_sizes_list = []
-        for size_group in self.window_sizes.values():
-            window_sizes_list.extend(size_group)
-        window_sizes_list = sorted(list(set(window_sizes_list)))
+        try:
+            window_sizes_list = []
+            for size_group in self.window_sizes.values():
+                window_sizes_list.extend(size_group)
+            window_sizes_list = sorted(list(set(window_sizes_list)))
+        except Exception as e:
+            logger.error(f"处理窗口大小时出错: {str(e)}")
+            window_sizes_list = [5, 10, 20, 50, 100, 200]  # 使用默认值
         
         try:
-            # 按特征组计算特征
-            if "price_based" in feature_groups:
-                temp_df = self.tech_indicators.calculate_price_features(result_df)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                else:
-                    logger.warning("价格特征计算返回空结果，跳过并使用原始DataFrame")
-            
-            if "volume_based" in feature_groups:
-                temp_df = self.tech_indicators.calculate_volume_features(result_df)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                else:
-                    logger.warning("交易量特征计算返回空结果，跳过并使用当前DataFrame")
-            
-            if "volatility" in feature_groups:
-                temp_df = self.tech_indicators.calculate_volatility_features(result_df)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                else:
-                    logger.warning("波动性特征计算返回空结果，跳过并使用当前DataFrame")
-            
-            if "trend" in feature_groups:
-                temp_df = self.tech_indicators.calculate_trend_features(result_df)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                else:
-                    logger.warning("趋势特征计算返回空结果，跳过并使用当前DataFrame")
-            
-            if "momentum" in feature_groups:
-                temp_df = self.tech_indicators.calculate_momentum_features(result_df)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                else:
-                    logger.warning("动量特征计算返回空结果，跳过并使用当前DataFrame")
-            
-            if "market_microstructure" in feature_groups:
-                # 计算市场微观结构特征（如果有相关数据）
-                has_bid_ask = all(col in result_df.columns for col in ['bid', 'ask'])
-                
-                if has_bid_ask:
-                    temp_df = self.microstructure.calculate_bid_ask_features(result_df)
+            # 按特征组计算特征 - 每次计算前检查result_df状态
+            if result_df is not None and not result_df.empty and "price_based" in feature_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_price_features(result_df)
                     if temp_df is not None and not temp_df.empty:
                         result_df = temp_df
+                    else:
+                        logger.warning("价格特征计算返回空结果，跳过并使用当前DataFrame")
+                except Exception as e:
+                    logger.error(f"计算价格特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            if result_df is not None and not result_df.empty and "volume_based" in feature_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_volume_features(result_df)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                    else:
+                        logger.warning("交易量特征计算返回空结果，跳过并使用当前DataFrame")
+                except Exception as e:
+                    logger.error(f"计算交易量特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            if result_df is not None and not result_df.empty and "volatility" in feature_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_volatility_features(result_df)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                    else:
+                        logger.warning("波动性特征计算返回空结果，跳过并使用当前DataFrame")
+                except Exception as e:
+                    logger.error(f"计算波动性特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            if result_df is not None and not result_df.empty and "trend" in feature_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_trend_features(result_df)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                    else:
+                        logger.warning("趋势特征计算返回空结果，跳过并使用当前DataFrame")
+                except Exception as e:
+                    logger.error(f"计算趋势特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            if result_df is not None and not result_df.empty and "momentum" in feature_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_momentum_features(result_df)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                    else:
+                        logger.warning("动量特征计算返回空结果，跳过并使用当前DataFrame")
+                except Exception as e:
+                    logger.error(f"计算动量特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            if result_df is not None and not result_df.empty and "market_microstructure" in feature_groups:
+                try:
+                    # 计算市场微观结构特征（如果有相关数据）
+                    has_bid_ask = all(col in result_df.columns for col in ['bid', 'ask'])
                     
-                    temp_df = self.microstructure.calculate_liquidity_features(result_df, window_sizes_list)
-                    if temp_df is not None and not temp_df.empty:
-                        result_df = temp_df
-                
-                # 计算其他微观结构特征（基于OHLCV数据）
-                temp_df = self.microstructure.calculate_order_flow_features(result_df, window_sizes_list)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                
-                temp_df = self.microstructure.calculate_volatility_clustering(result_df, window_sizes_list)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
-                
-                temp_df = self.microstructure.calculate_price_impact(result_df, window_sizes_list)
-                if temp_df is not None and not temp_df.empty:
-                    result_df = temp_df
+                    if has_bid_ask:
+                        try:
+                            temp_df = self.microstructure.calculate_bid_ask_features(result_df)
+                            if temp_df is not None and not temp_df.empty:
+                                result_df = temp_df
+                        except Exception as e:
+                            logger.error(f"计算买卖盘特征时出错: {str(e)}")
+                        
+                        try:
+                            temp_df = self.microstructure.calculate_liquidity_features(result_df, window_sizes_list)
+                            if temp_df is not None and not temp_df.empty:
+                                result_df = temp_df
+                        except Exception as e:
+                            logger.error(f"计算流动性特征时出错: {str(e)}")
+                    
+                    # 计算其他微观结构特征（基于OHLCV数据）
+                    try:
+                        temp_df = self.microstructure.calculate_order_flow_features(result_df, window_sizes_list)
+                        if temp_df is not None and not temp_df.empty:
+                            result_df = temp_df
+                    except Exception as e:
+                        logger.error(f"计算订单流特征时出错: {str(e)}")
+                    
+                    try:
+                        temp_df = self.microstructure.calculate_volatility_clustering(result_df, window_sizes_list)
+                        if temp_df is not None and not temp_df.empty:
+                            result_df = temp_df
+                    except Exception as e:
+                        logger.error(f"计算波动率聚类特征时出错: {str(e)}")
+                    
+                    try:
+                        temp_df = self.microstructure.calculate_price_impact(result_df, window_sizes_list)
+                        if temp_df is not None and not temp_df.empty:
+                            result_df = temp_df
+                    except Exception as e:
+                        logger.error(f"计算价格影响特征时出错: {str(e)}")
+                except Exception as e:
+                    logger.error(f"计算微观结构特征时出错: {str(e)}")
+                    # 继续使用当前result_df，不更新
+            
+            # 检查result_df是否有效，如果无效则恢复使用原始DataFrame
+            if result_df is None or result_df.empty:
+                logger.warning("特征计算后得到空DataFrame，恢复使用原始数据")
+                result_df = original_df.copy()
             
             # 计算技术指标（如果未在上述特征组中处理）
-            # 将技术指标名称映射到新的结构
-            indicators_mapping = {
-                'MACD': 'momentum',
-                'RSI': 'momentum',
-                'STOCH': 'momentum',
-                'BBANDS': 'volatility',
-                'ATR': 'volatility',
-                'ADX': 'trend',
-                'CCI': 'trend'
-            }
-            
-            # 获取需要计算的指标组
-            needed_groups = set()
-            for ind in ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']:
-                if indicators_mapping.get(ind) not in feature_groups:
-                    needed_groups.add(indicators_mapping.get(ind))
-            
-            # 如果有需要单独计算的指标组
-            if needed_groups:
+            if result_df is not None and not result_df.empty:
                 try:
-                    temp_df = self.tech_indicators.calculate_indicators(
-                        result_df, 
-                        indicators=list(needed_groups),
-                        window_sizes=None
-                    )
-                    if temp_df is not None and not temp_df.empty:
-                        result_df = temp_df
+                    # 将技术指标名称映射到新的结构
+                    indicators_mapping = {
+                        'MACD': 'momentum',
+                        'RSI': 'momentum',
+                        'STOCH': 'momentum',
+                        'BBANDS': 'volatility',
+                        'ATR': 'volatility',
+                        'ADX': 'trend',
+                        'CCI': 'trend'
+                    }
+                    
+                    # 获取需要计算的指标组
+                    needed_groups = set()
+                    for ind in ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']:
+                        if indicators_mapping.get(ind) not in feature_groups:
+                            needed_groups.add(indicators_mapping.get(ind))
+                    
+                    # 如果有需要单独计算的指标组
+                    if needed_groups:
+                        try:
+                            temp_df = self.tech_indicators.calculate_indicators(
+                                result_df, 
+                                indicators=list(needed_groups),
+                                window_sizes=None
+                            )
+                            if temp_df is not None and not temp_df.empty:
+                                result_df = temp_df
+                        except Exception as e:
+                            logger.error(f"计算额外技术指标时出错: {str(e)}")
+                            # 即使额外指标计算失败，也保留当前的结果_df
                 except Exception as e:
-                    logger.error(f"计算额外技术指标时出错: {str(e)}")
-                    # 即使额外指标计算失败，也保留当前的结果_df
+                    logger.error(f"处理技术指标映射时出错: {str(e)}")
+            
+            # 最终检查结果
+            if result_df is None or result_df.empty:
+                logger.warning("所有特征计算失败，返回原始数据")
+                result_df = original_df.copy()
             
             logger.info(f"已计算 {len(result_df.columns) - len(df.columns)} 个特征")
             return result_df
@@ -216,7 +275,7 @@ class FeatureEngineer:
             import traceback
             logger.debug(traceback.format_exc())
             # 返回原始DataFrame的副本，确保不会返回None
-            return df.copy()
+            return original_df.copy()
     
     def compute_features_batch(self, df, feature_groups=None):
         """
