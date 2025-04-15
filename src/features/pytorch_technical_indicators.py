@@ -887,9 +887,8 @@ class PyTorchTechnicalIndicators:
         if df is None or df.empty:
             logger.warning("无法计算空数据的技术指标")
             return df
+        result_df = df.copy()  # 提前初始化，防止except引用未定义
         start_time = time.time()
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
         try:
             # 查找数据中的OHLCV列
             ohlcv_candidates = {
@@ -992,7 +991,11 @@ class PyTorchTechnicalIndicators:
             logger.error(f"计算技术指标时出错: {str(e)}")
             import traceback
             logger.debug(traceback.format_exc())
-            return result_df
+            # except分支兜底，防止result_df未定义
+            if 'result_df' in locals():
+                return result_df
+            else:
+                return df.copy()
     
     def calculate_price_features(self, df):
         """
