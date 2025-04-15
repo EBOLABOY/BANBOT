@@ -14,55 +14,21 @@ from src.features.torch_utils import get_device, df_to_tensor, tensor_to_df, mov
 
 logger = get_logger(__name__)
 
+def ensure_2d(tensor):
+    """确保张量为二维[N, 1]"""
+    if tensor.dim() == 1:
+        return tensor.unsqueeze(1)
+    return tensor
+
 def match_shape(a, b):
-    """
-    将张量a的形状调整为与b一致，用于安全广播。
-    处理常见维度不匹配情况。
-    """
+    # 兼容保留，实际全程用[N, 1]后很少用到
+    a = ensure_2d(a)
+    b = ensure_2d(b)
     if a.shape == b.shape:
         return a
-
-    a_dim, b_dim = a.dim(), b.dim()
-    a_shape, b_shape = a.shape, b.shape
-
-    # Case 1: 1D vs 2D ([N] vs [M, K])
-    if a_dim == 1 and b_dim == 2:
-        # Expand 1D tensor 'a' to match 2D tensor 'b'
-        # Typically assumes a should be broadcast across the second dim of b
-        return a.unsqueeze(1).expand_as(b)
-
-    # Case 2: 2D vs 1D ([N, C] vs [M])
-    if a_dim == 2 and b_dim == 1:
-        # If 'a' is [N, 1], squeeze it to match [N]
-        if a_shape[1] == 1 and a_shape[0] == b_shape[0]:
-            return a.squeeze(1)
-        # If 'a' is [N, C] (C > 1) and 'b' is [N], use the first column of 'a'
-        elif a_shape[1] > 1 and a_shape[0] == b_shape[0]:
-            logger.warning(f"match_shape: Matching 2D tensor a (shape {a_shape}) with 1D tensor b (shape {b_shape}) "
-                           f"by using the first column of a. Verify this assumption.")
-            return a[:, 0]
-        # Other 2D vs 1D mismatches are ambiguous
-        else:
-             raise ValueError(f"match_shape: Cannot unambiguously match shape {a_shape} with {b_shape}")
-
-
-    # Case 3: 1D vs 1D (different lengths) - usually an error unless broadcasting is intended
-    if a_dim == 1 and b_dim == 1:
-         # Allow broadcasting if one dimension is 1, otherwise it's likely an error
-         if a_shape[0] == 1 or b_shape[0] == 1:
-             logger.warning(f"match_shape: Broadcasting 1D tensor {a_shape} to {b_shape}. Verify this behavior.")
-             return a.expand_as(b) # Fallback to expand_as, might still fail
-         else:
-             raise ValueError(f"match_shape: Cannot match 1D shapes {a_shape} and {b_shape} without ambiguity.")
-
-
-    # Fallback for other cases (e.g., 2D vs 2D with different shapes)
-    logger.warning(f"match_shape: Falling back to expand_as for shapes {a_shape} vs {b_shape}. This might fail.")
-    try:
-        return a.expand_as(b)
-    except RuntimeError as e:
-        logger.error(f"match_shape: expand_as failed for shapes {a_shape} vs {b_shape}: {e}")
-        raise e
+    if a.shape[0] == b.shape[0] and a.shape[1] == 1 and b.shape[1] == 1:
+        return a
+    raise ValueError(f"match_shape: 不能匹配形状 {a.shape} 和 {b.shape}")
 
 class PyTorchTechnicalIndicators:
     """
@@ -194,10 +160,10 @@ class PyTorchTechnicalIndicators:
             logger.warning("价格特征张量计算缺少必要的输入张量")
             return {}
 
-        close = tensor_dict['close']
-        high = tensor_dict['high']
-        low = tensor_dict['low']
-        open_price = tensor_dict['open']
+        close = ensure_2d(tensor_dict['close'])
+        high = ensure_2d(tensor_dict['high'])
+        low = ensure_2d(tensor_dict['low'])
+        open_price = ensure_2d(tensor_dict['open'])
 
         if not all(t.shape[0] == close.shape[0] for t in [high, low, open_price]):
             logger.error("价格特征输入张量长度不匹配")
@@ -208,7 +174,7 @@ class PyTorchTechnicalIndicators:
 
         # Price change percentage
         prev_close = torch.roll(close, shifts=1, dims=0)
-        prev_close[0] = float('nan') # First value has no pct change
+        prev_close[0] = float('nan')
         price_change_pct = (close - prev_close) / (prev_close + 1e-10)
         result_tensors['price_change_pct'] = price_change_pct
 
@@ -233,8 +199,8 @@ class PyTorchTechnicalIndicators:
                 if high_windows.shape[0] == 0 or low_windows.shape[0] == 0:
                     logger.debug(f"价格相对位置窗口大小 {window} 无效或大于数据长度")
                     continue
-                high_max = torch.max(high_windows, dim=1)[0]
-                low_min = torch.min(low_windows, dim=1)[0]
+                high_max = torch.max(high_windows, dim=1, keepdim=True)[0]
+                low_min = torch.min(low_windows, dim=1, keepdim=True)[0]
                 high_max_full = torch.full_like(close, float('nan'))
                 low_min_full = torch.full_like(close, float('nan'))
                 high_max_full[window-1:] = high_max
@@ -253,8 +219,8 @@ class PyTorchTechnicalIndicators:
         if volatility_window > 0 and volatility_window <= len(price_change_pct):
             price_change_pct_nonan = torch.where(torch.isnan(price_change_pct), torch.zeros_like(price_change_pct), price_change_pct)
             windows = rolling_window(price_change_pct_nonan, volatility_window)
-            if windows.shape[0] > 0: # Ensure windows are generated
-                volatility = torch.std(windows, dim=1, unbiased=True)
+            if windows.shape[0] > 0:
+                volatility = torch.std(windows, dim=1, unbiased=True, keepdim=True)
                 volatility_full = torch.full_like(close, float('nan'))
                 volatility_full[volatility_window-1:] = volatility
                 result_tensors['price_volatility'] = volatility_full
@@ -280,10 +246,10 @@ class PyTorchTechnicalIndicators:
             logger.warning("交易量特征张量计算缺少必要的输入张量")
             return {}
 
-        volume = tensor_dict['volume']
-        close = tensor_dict['close']
-        high = tensor_dict['high']
-        low = tensor_dict['low']
+        volume = ensure_2d(tensor_dict['volume'])
+        close = ensure_2d(tensor_dict['close'])
+        high = ensure_2d(tensor_dict['high'])
+        low = ensure_2d(tensor_dict['low'])
 
         if not all(t.shape[0] == volume.shape[0] for t in [close, high, low]):
             logger.error("交易量特征输入张量长度不匹配")
@@ -294,7 +260,7 @@ class PyTorchTechnicalIndicators:
 
         # Volume change percentage
         prev_volume = torch.roll(volume, shifts=1, dims=0)
-        prev_volume[0] = float('nan') # First value has no previous
+        prev_volume[0] = float('nan')
         volume_change_pct = (volume - prev_volume) / (prev_volume + 1e-10)
         result_tensors['volume_change_pct'] = volume_change_pct
 
@@ -378,7 +344,7 @@ class PyTorchTechnicalIndicators:
             if 'close' not in tensor_dict:
                 raise ValueError("tensor_dict必须包含'close'键")
 
-            close = tensor_dict['close']
+            close = ensure_2d(tensor_dict['close'])
             
             # 确保张量是2D的 [batch_size, features]
             if close.dim() == 1:
@@ -422,8 +388,8 @@ class PyTorchTechnicalIndicators:
 
             # 计算ATR (如果高低价格可用)
             if 'high' in tensor_dict and 'low' in tensor_dict:
-                high = tensor_dict['high']
-                low = tensor_dict['low']
+                high = ensure_2d(tensor_dict['high'])
+                low = ensure_2d(tensor_dict['low'])
                 
                 # 确保张量是2D的
                 if high.dim() == 1:
@@ -492,7 +458,7 @@ class PyTorchTechnicalIndicators:
             if 'close' not in tensor_dict:
                 raise ValueError("tensor_dict必须包含'close'键")
 
-            close = tensor_dict['close']
+            close = ensure_2d(tensor_dict['close'])
             
             # 确保张量是2D的 [batch_size, features]
             if close.dim() == 1:
@@ -596,11 +562,7 @@ class PyTorchTechnicalIndicators:
             
         try:
             # 获取收盘价并确保张量格式正确
-            close = tensor_dict['close']
-            
-            # 确保张量是2D的 [batch_size, 1]，如果是1D则扩展维度
-            if close.dim() == 1:
-                close = close.unsqueeze(1)
+            close = ensure_2d(tensor_dict['close'])
             
             # 计算RSI
             try:

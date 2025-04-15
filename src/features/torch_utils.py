@@ -75,11 +75,14 @@ def df_to_tensor(df, columns=None):
         for standard_col, variants in standard_cols.items():
             for variant in variants:
                 if variant in col_mapping:
-                    tensor_dict[standard_col] = torch.tensor(
+                    tensor = torch.tensor(
                         df[col_mapping[variant]].values.astype(np.float32), 
                         dtype=torch.float32, 
                         device=DEVICE
                     )
+                    if tensor.dim() == 1:
+                        tensor = tensor.unsqueeze(1)
+                    tensor_dict[standard_col] = tensor
                     break
         
         # 针对每一列创建张量 (包括非标准列名)
@@ -92,9 +95,10 @@ def df_to_tensor(df, columns=None):
             # 从DataFrame中提取数值列
             try:
                 data_np = df[col].values.astype(np.float32)
-                
-                # 转换为PyTorch张量
-                tensor_dict[col] = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)
+                tensor = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)
+                if tensor.dim() == 1:
+                    tensor = tensor.unsqueeze(1)
+                tensor_dict[col] = tensor
             except Exception as e:
                 logger.warning(f"df_to_tensor: 无法转换列 {col} 为张量: {str(e)}")
     
@@ -124,11 +128,10 @@ def tensor_to_df(tensor, columns, index=None):
     # 确保张量在CPU上
     if tensor.is_cuda:
         tensor = tensor.cpu()
-    
-    # 转换为NumPy数组
+    # 如果是[N, 1]，则squeeze为一维
+    if tensor.dim() == 2 and tensor.shape[1] == 1:
+        tensor = tensor.squeeze(1)
     data_np = tensor.numpy()
-    
-    # 创建DataFrame
     return pd.DataFrame(data=data_np, columns=columns, index=index)
 
 def rolling_window(tensor, window_size):
@@ -144,22 +147,10 @@ def rolling_window(tensor, window_size):
         如果输入是 2D: 形状为 [N-window_size+1, window_size, C] 的张量
     """
     # 确保输入张量是二维的
-    input_is_1d = False
     if tensor.dim() == 1:
-        input_is_1d = True
-        tensor = tensor.unsqueeze(1)  # 将 [N] 转为 [N, 1]
-    
-    # 检查张量形状
+        tensor = tensor.unsqueeze(1)
     logger.debug(f"rolling_window: 输入张量形状 {tensor.shape}, 窗口大小 {window_size}")
-    
-    # 使用 unfold 创建窗口视图
     windows = tensor.unfold(0, window_size, 1)
-    
-    # 返回适当形状的张量
-    if input_is_1d and windows.dim() > 2:
-        # 如果原始输入是1D，最终结果应该是二维的 [N-window_size+1, window_size]
-        windows = windows.squeeze(-1)
-    
     logger.debug(f"rolling_window: 返回窗口形状 {windows.shape}")
     return windows
 
@@ -175,62 +166,31 @@ def moving_average(tensor, window_size, weights=None):
     返回:
         移动平均结果张量，保持与输入相同的维度
     """
-    # 确保张量在GPU上
     if isinstance(tensor, np.ndarray):
         tensor = torch.tensor(tensor, dtype=torch.float32, device=DEVICE)
-    
-    # 记录原始维度
-    original_dim = tensor.dim()
-    
-    # 确保张量是二维的用于处理
-    if original_dim == 1:
-        tensor = tensor.unsqueeze(1)  # [N] -> [N, 1]
-    
-    # 获取张量形状
+    if tensor.dim() == 1:
+        tensor = tensor.unsqueeze(1)
     n_samples, n_features = tensor.shape
-    
-    # 记录处理日志
     logger.debug(f"moving_average: 输入张量形状 {tensor.shape}, 窗口 {window_size}")
-    
-    # 创建滚动窗口视图
     try:
-        windows = rolling_window(tensor, window_size)  # [N-window_size+1, window_size, n_features]
-        
-        # 处理NaN值
+        windows = rolling_window(tensor, window_size)
         nan_mask = torch.isnan(windows)
         windows = torch.where(nan_mask, torch.zeros_like(windows), windows)
-        
-        # 计算移动平均
         if weights is not None:
-            # 确保权重在GPU上
             weights = weights.to(DEVICE)
-            # 加权移动平均
-            if windows.dim() == 3:  # [N-window_size+1, window_size, n_features]
+            if windows.dim() == 3:
                 ma = torch.sum(windows * weights.view(1, -1, 1), dim=1) / torch.sum(weights)
-            else:  # [N-window_size+1, window_size]
+            else:
                 ma = torch.sum(windows * weights.view(1, -1), dim=1) / torch.sum(weights)
         else:
-            # 简单移动平均
             ma = torch.nanmean(windows, dim=1)
-        
-        # 创建结果张量
         result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
         result[window_size-1:] = ma
-        
-        # 如果原始输入是一维的，返回一维结果
-        if original_dim == 1:
-            result = result.squeeze(1)
-            
         logger.debug(f"moving_average: 返回张量形状 {result.shape}")
         return result
-        
     except Exception as e:
         logger.error(f"moving_average计算错误: {str(e)}")
-        # 返回原始形状的NaN张量
-        if original_dim == 1:
-            return torch.full((n_samples,), float('nan'), device=DEVICE)
-        else:
-            return torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        return torch.full((n_samples, n_features), float('nan'), device=DEVICE)
 
 def ewma(tensor, span, adjust=False):
     """
@@ -246,26 +206,16 @@ def ewma(tensor, span, adjust=False):
     """
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(1)
-    
-    # 计算EWMA的alpha参数
     alpha = 2.0 / (span + 1.0)
-    
-    # 初始化结果
     result = torch.zeros_like(tensor)
     result[0] = tensor[0]
-    
-    # 迭代计算EWMA
     for i in range(1, len(tensor)):
-        # 处理NaN值
         mask = ~torch.isnan(tensor[i])
         if adjust:
-            # 调整衰减
             prev_val = torch.where(mask, result[i-1], torch.zeros_like(result[i-1]))
             result[i] = torch.where(mask, alpha * tensor[i] + (1 - alpha) * prev_val, result[i-1])
         else:
-            # 标准EWMA
             result[i] = torch.where(mask, alpha * tensor[i] + (1 - alpha) * result[i-1], result[i-1])
-    
     return result
 
 def correlation(x, y, window_size):
@@ -284,30 +234,15 @@ def correlation(x, y, window_size):
         x = x.unsqueeze(1)
     if y.dim() == 1:
         y = y.unsqueeze(1)
-    
-    # 创建滚动窗口
     x_windows = rolling_window(x, window_size)
     y_windows = rolling_window(y, window_size)
-    
-    # 计算窗口内的平均值
     x_mean = torch.nanmean(x_windows, dim=1, keepdim=True)
     y_mean = torch.nanmean(y_windows, dim=1, keepdim=True)
-    
-    # 计算协方差
     cov = torch.nanmean((x_windows - x_mean) * (y_windows - y_mean), dim=1)
-    
-    # 计算标准差
     x_std = torch.sqrt(torch.nanmean((x_windows - x_mean)**2, dim=1))
     y_std = torch.sqrt(torch.nanmean((y_windows - y_mean)**2, dim=1))
-    
-    # 计算相关系数
     corr = cov / (x_std * y_std)
-    
-    # 处理边界情况
     corr = torch.where(torch.isnan(corr) | torch.isinf(corr), torch.zeros_like(corr), corr)
-    
-    # 填充缺失的值
     result = torch.full((x.shape[0], x.shape[1]), float('nan'), device=DEVICE)
     result[window_size-1:] = corr
-    
     return result 
