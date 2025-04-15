@@ -27,6 +27,7 @@ class PyTorchTechnicalIndicators:
         """
         self.device = get_device()
         logger.info(f"PyTorch技术指标计算器初始化，使用设备: {self.device}")
+        self.default_windows = [5, 10, 20, 30, 50] # 添加默认窗口大小列表
 
     # --- Helper Functions ---
 
@@ -179,45 +180,38 @@ class PyTorchTechnicalIndicators:
                 high_windows = rolling_window(high, window)
                 low_windows = rolling_window(low, window)
                 # Ensure window calculation didn't return empty
-                if high_windows.shape[0] == 0 or low_windows.shape[0] == 0: continue
-
+                if high_windows.shape[0] == 0 or low_windows.shape[0] == 0:
+                    logger.debug(f"价格相对位置窗口大小 {window} 无效或大于数据长度")
+                    continue
                 high_max = torch.max(high_windows, dim=1)[0]
                 low_min = torch.min(low_windows, dim=1)[0]
-
                 high_max_full = torch.full_like(close, float('nan'))
                 low_min_full = torch.full_like(close, float('nan'))
-
                 high_max_full[window-1:] = high_max
                 low_min_full[window-1:] = low_min
-
-                # Fill initial NaNs by calculating max/min over the available window
                 for i in range(window-1):
-                     if i+1 <= len(high):
-                         high_max_full[i] = torch.max(high[:i+1])
-                         low_min_full[i] = torch.min(low[:i+1])
-
+                    if i+1 <= len(high):
+                        high_max_full[i] = torch.max(high[:i+1])
+                        low_min_full[i] = torch.min(low[:i+1])
                 price_rel_high = close / (high_max_full + 1e-10)
                 price_rel_low = close / (low_min_full + 1e-10)
                 result_tensors[f'price_rel_high_{window}'] = price_rel_high
                 result_tensors[f'price_rel_low_{window}'] = price_rel_low
-            else:
-                 logger.debug(f"价格相对位置窗口大小 {window} 无效或大于数据长度") # Debug level
 
         # Price volatility (rolling std dev of pct change)
         volatility_window = 20
         if volatility_window > 0 and volatility_window <= len(price_change_pct):
-             # Need to handle NaNs in price_change_pct for std calculation
-             price_change_pct_nonan = torch.where(torch.isnan(price_change_pct), torch.zeros_like(price_change_pct), price_change_pct)
-             windows = rolling_window(price_change_pct_nonan, volatility_window)
-             if windows.shape[0] > 0: # Ensure windows are generated
-                 volatility = torch.std(windows, dim=1, unbiased=True)
-                 volatility_full = torch.full_like(close, float('nan'))
-                 volatility_full[volatility_window-1:] = volatility
-                 result_tensors['price_volatility'] = volatility_full
-             else:
-                 logger.debug(f"无法为波动率生成滚动窗口 {volatility_window}")
+            price_change_pct_nonan = torch.where(torch.isnan(price_change_pct), torch.zeros_like(price_change_pct), price_change_pct)
+            windows = rolling_window(price_change_pct_nonan, volatility_window)
+            if windows.shape[0] > 0: # Ensure windows are generated
+                volatility = torch.std(windows, dim=1, unbiased=True)
+                volatility_full = torch.full_like(close, float('nan'))
+                volatility_full[volatility_window-1:] = volatility
+                result_tensors['price_volatility'] = volatility_full
+            else:
+                logger.debug(f"无法为波动率生成滚动窗口 {volatility_window}")
         else:
-             logger.debug(f"价格波动率窗口大小 {volatility_window} 无效或大于数据长度")
+            logger.debug(f"价格波动率窗口大小 {volatility_window} 无效或大于数据长度")
 
         return result_tensors
 
@@ -261,7 +255,7 @@ class PyTorchTechnicalIndicators:
                 rel_volume = volume / (volume_ma + 1e-10)
                 result_tensors[f'rel_volume_{window}'] = rel_volume
             else:
-                 logger.debug(f"相对交易量窗口大小 {window} 无效或大于数据长度")
+                logger.debug(f"相对交易量窗口大小 {window} 无效或大于数据长度")
 
         # Volume Weighted Average Price (VWAP) - Cumulative for the batch
         typical_price = (high + low + close) / 3
@@ -421,7 +415,7 @@ class PyTorchTechnicalIndicators:
                         result_tensors[col_name] = norm_atr
 
             return result_tensors
-            
+
         except Exception as e:
             logger.error(f"计算波动率特征时出错: {str(e)}")
             import traceback
@@ -760,11 +754,9 @@ class PyTorchTechnicalIndicators:
     def _calculate_rolling_mean(self, tensor, window):
         """
         计算张量的滚动平均值
-        
         参数:
             tensor: 输入张量，可以是1D [N] 或 2D [N, C]
             window: 窗口大小
-            
         返回:
             滚动平均值张量
         """
@@ -772,32 +764,25 @@ class PyTorchTechnicalIndicators:
             # 检查张量维度
             original_shape = tensor.shape
             original_dim = tensor.dim()
-            
             # 确保张量是1D的
             if original_dim > 1:
                 tensor = tensor.squeeze()
                 logger.debug(f"将张量从 {original_shape} 转换为 {tensor.shape}")
-            
             # 获取滚动窗口
             windows = rolling_window(tensor, window)
-            
             if windows.shape[0] > 0:
                 # 计算平均值
                 mean_values = torch.mean(windows, dim=1)
-                
                 # 创建结果张量
                 result = torch.full_like(tensor, float('nan'))
                 result[window-1:] = mean_values
-                
                 # 恢复原始形状
                 if original_dim > 1:
                     result = result.view(original_shape)
-                
                 return result
             else:
                 logger.warning(f"无法为 {window} 窗口生成滚动平均值")
                 return torch.full_like(tensor, float('nan'))
-                
         except Exception as e:
             logger.error(f"计算滚动平均值时出错: {str(e)}")
             return torch.full_like(tensor, float('nan'))
@@ -844,24 +829,19 @@ class PyTorchTechnicalIndicators:
     def calculate_indicators(self, df, indicators=None, window_sizes=None):
         """
         计算技术指标，PyTorch版 (DataFrame based)
-        
         参数:
             df: DataFrame对象，包含OHLCV数据
             indicators: 要计算的指标列表，默认为None表示计算所有指标
             window_sizes: 窗口大小字典，用于覆盖默认窗口大小
-            
         返回:
             包含技术指标的DataFrame
         """
         if df is None or df.empty:
             logger.warning("无法计算空数据的技术指标")
             return df
-            
         start_time = time.time()
-        
         # 创建副本，避免修改原始数据
         result_df = df.copy()
-        
         try:
             # 查找数据中的OHLCV列
             ohlcv_candidates = {
@@ -871,7 +851,6 @@ class PyTorchTechnicalIndicators:
                 'close': ['close', 'c', 'close_price', 'adj_close', 'adjusted_close'],
                 'volume': ['volume', 'v', 'vol', 'volume_traded']
             }
-            
             # 查找实际的列名
             actual_cols = {}
             cols_found = []
@@ -881,115 +860,86 @@ class PyTorchTechnicalIndicators:
                         actual_cols[standard_col] = col
                         cols_found.append(standard_col)
                         break
-            
             # 记录找到的列
             if cols_found:
                 logger.debug(f"找到的OHLCV列: {cols_found}")
             else:
                 logger.warning("未找到任何OHLCV列，将使用原始列名")
-                
             # 将DataFrame转换为张量字典
             tensor_dict = df_to_tensor(df)
-            
             # 将找到的列映射到标准名称
             mapped_tensor_dict = {}
             for standard_col, actual_col in actual_cols.items():
                 if actual_col in tensor_dict:
                     mapped_tensor_dict[standard_col] = tensor_dict[actual_col]
                 elif actual_col.lower() in tensor_dict:
-                    # 尝试使用小写名称
                     mapped_tensor_dict[standard_col] = tensor_dict[actual_col.lower()]
-            
             # 如果映射的字典为空，使用原始的张量字典
             if not mapped_tensor_dict:
                 logger.warning("映射后的张量字典为空，使用原始张量字典")
-                # 尝试直接从原始字典中查找OHLCV列
                 for standard_col in ['open', 'high', 'low', 'close', 'volume']:
                     if standard_col in tensor_dict:
                         mapped_tensor_dict[standard_col] = tensor_dict[standard_col]
                     elif standard_col.lower() in tensor_dict:
                         mapped_tensor_dict[standard_col] = tensor_dict[standard_col.lower()]
-            
             # 检查是否有必要的键
             required_keys = ['open', 'high', 'low', 'close']
             missing_keys = [key for key in required_keys if key not in mapped_tensor_dict]
             if missing_keys:
                 logger.warning(f"张量字典缺少必要的键: {missing_keys}，某些特征可能无法计算")
-                # 尝试从原始张量字典中复制必要的键
                 for key in missing_keys:
-                    # 使用可能的替代键
                     for alt_key in tensor_dict.keys():
                         if key in alt_key.lower():
                             mapped_tensor_dict[key] = tensor_dict[alt_key]
                             logger.debug(f"使用 {alt_key} 替代 {key}")
                             break
-            
-            # 根据indicators参数决定计算哪些指标
             all_indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
             if indicators is None:
                 indicators = all_indicators
             elif isinstance(indicators, list) and indicators and isinstance(indicators[0], str):
-                # 检查是否是传统的指标名称
                 traditional_indicators = ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']
                 if any(ind.upper() in traditional_indicators for ind in indicators):
-                    # 创建映射
                     indicator_map = {
                         'MACD': 'momentum', 'RSI': 'momentum', 'STOCH': 'momentum',
                         'BBANDS': 'volatility', 'ATR': 'volatility',
                         'ADX': 'trend', 'CCI': 'trend'
                     }
-                    # 转换为新的分类
                     converted_indicators = set()
                     for ind in indicators:
                         mapped_ind = indicator_map.get(ind.upper())
                         if mapped_ind:
                             converted_indicators.add(mapped_ind)
-                    
-                    # 如果有转换后的指标，使用它们
                     if converted_indicators:
                         indicators = list(converted_indicators)
                     else:
-                        # 如果没有映射成功，使用所有分类
                         indicators = all_indicators
-            
-            # 计算各类特征
             result_tensors = {}
-            
             if 'price' in indicators and all(k in mapped_tensor_dict for k in ['open', 'high', 'low', 'close']):
                 logger.debug("计算价格特征...")
                 price_features = self.calculate_price_features_tensor(mapped_tensor_dict)
                 result_tensors.update(price_features)
-                
             if 'volume' in indicators and 'volume' in mapped_tensor_dict and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
                 logger.debug("计算交易量特征...")
                 volume_features = self.calculate_volume_features_tensor(mapped_tensor_dict)
                 result_tensors.update(volume_features)
-                
             if 'volatility' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
                 logger.debug("计算波动性特征...")
                 volatility_features = self.calculate_volatility_features_tensor(mapped_tensor_dict)
                 result_tensors.update(volatility_features)
-                
             if 'trend' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
                 logger.debug("计算趋势特征...")
                 trend_features = self.calculate_trend_features_tensor(mapped_tensor_dict)
                 result_tensors.update(trend_features)
-                
             if 'momentum' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
                 logger.debug("计算动量特征...")
                 momentum_features = self.calculate_momentum_features_tensor(mapped_tensor_dict)
                 result_tensors.update(momentum_features)
-            
-            # 将计算的特征结果添加回DataFrame
             if result_tensors:
                 result_df = self._add_results_to_df(result_df, result_tensors)
-                
-            # 性能日志
             end_time = time.time()
             calculation_time = end_time - start_time
             logger.info(f"已计算技术指标 (PyTorch版): {', '.join(indicators)} (耗时: {calculation_time:.2f}秒)")
             return result_df
-            
         except Exception as e:
             logger.error(f"计算技术指标时出错: {str(e)}")
             import traceback
@@ -1011,8 +961,8 @@ class PyTorchTechnicalIndicators:
             return df
         
         # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
+            result_df = df.copy()
+            
         # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
@@ -1101,8 +1051,8 @@ class PyTorchTechnicalIndicators:
             return df
         
         # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
+            result_df = df.copy()
+            
         # 将DataFrame转换为张量字典，并映射列名
         tensor_dict = df_to_tensor(df)
         
@@ -1220,7 +1170,7 @@ class PyTorchTechnicalIndicators:
         
         logger.info("已计算动量特征 (PyTorch版)")
         return result_df
-
+                
 
 # 将 PyTorchCompatibleTechnicalIndicators 定义为全局类，而不是内部类，这样可以直接替换原始类
 class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
@@ -1244,7 +1194,7 @@ class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
         if df is None or df.empty:
             logger.warning("无法计算空数据的技术指标")
             return df
-            
+        
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
@@ -1310,228 +1260,28 @@ class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
     def calculate_price_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        
-        if df is None or df.empty:
-            logger.warning("无法计算空数据的价格特征")
-            return df
-            
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
-        try:
-            # 将DataFrame转换为张量字典
-            tensor_dict = df_to_tensor(df)
-            
-            # 映射张量字典中的键名
-            mapped_tensor_dict = {}
-            # 尝试匹配常见的列命名
-            for col in df.columns:
-                col_lower = col.lower()
-                if 'open' in col_lower:
-                    mapped_tensor_dict['open'] = tensor_dict[col]
-                elif 'high' in col_lower:
-                    mapped_tensor_dict['high'] = tensor_dict[col]
-                elif 'low' in col_lower:
-                    mapped_tensor_dict['low'] = tensor_dict[col]
-                elif 'close' in col_lower:
-                    mapped_tensor_dict['close'] = tensor_dict[col]
-                elif 'volume' in col_lower:
-                    mapped_tensor_dict['volume'] = tensor_dict[col]
-            
-            # 使用实例方法计算价格特征
-            result_tensors = instance.calculate_price_features_tensor(mapped_tensor_dict)
-            
-            # 将计算结果添加回DataFrame
-            if result_tensors:
-                result_df = instance._add_results_to_df(result_df, result_tensors)
-                
-            logger.info("已计算价格特征 (PyTorch兼容版)")
-            return result_df
-            
-        except Exception as e:
-            logger.error(f"PyTorch兼容层计算价格特征时出错: {str(e)}")
-            return result_df
+        return instance.calculate_price_features(df)
     
     @staticmethod
     def calculate_volume_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        
-        if df is None or df.empty:
-            logger.warning("无法计算空数据的交易量特征")
-            return df
-            
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
-        try:
-            # 将DataFrame转换为张量字典
-            tensor_dict = df_to_tensor(df)
-            
-            # 映射张量字典中的键名
-            mapped_tensor_dict = {}
-            # 尝试匹配常见的列命名
-            for col in df.columns:
-                col_lower = col.lower()
-                if 'open' in col_lower:
-                    mapped_tensor_dict['open'] = tensor_dict[col]
-                elif 'high' in col_lower:
-                    mapped_tensor_dict['high'] = tensor_dict[col]
-                elif 'low' in col_lower:
-                    mapped_tensor_dict['low'] = tensor_dict[col]
-                elif 'close' in col_lower:
-                    mapped_tensor_dict['close'] = tensor_dict[col]
-                elif 'volume' in col_lower:
-                    mapped_tensor_dict['volume'] = tensor_dict[col]
-            
-            # 使用实例方法计算交易量特征
-            result_tensors = instance.calculate_volume_features_tensor(mapped_tensor_dict)
-            
-            # 将计算结果添加回DataFrame
-            if result_tensors:
-                result_df = instance._add_results_to_df(result_df, result_tensors)
-                
-            logger.info("已计算交易量特征 (PyTorch兼容版)")
-            return result_df
-            
-        except Exception as e:
-            logger.error(f"PyTorch兼容层计算交易量特征时出错: {str(e)}")
-            return result_df
+        return instance.calculate_volume_features(df)
     
     @staticmethod
     def calculate_volatility_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        
-        if df is None or df.empty:
-            logger.warning("无法计算空数据的波动性特征")
-            return df
-            
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
-        try:
-            # 将DataFrame转换为张量字典
-            tensor_dict = df_to_tensor(df)
-            
-            # 映射张量字典中的键名
-            mapped_tensor_dict = {}
-            # 尝试匹配常见的列命名
-            for col in df.columns:
-                col_lower = col.lower()
-                if 'open' in col_lower:
-                    mapped_tensor_dict['open'] = tensor_dict[col]
-                elif 'high' in col_lower:
-                    mapped_tensor_dict['high'] = tensor_dict[col]
-                elif 'low' in col_lower:
-                    mapped_tensor_dict['low'] = tensor_dict[col]
-                elif 'close' in col_lower:
-                    mapped_tensor_dict['close'] = tensor_dict[col]
-                elif 'volume' in col_lower:
-                    mapped_tensor_dict['volume'] = tensor_dict[col]
-            
-            # 使用实例方法计算波动性特征
-            result_tensors = instance.calculate_volatility_features_tensor(mapped_tensor_dict)
-            
-            # 将计算结果添加回DataFrame
-            if result_tensors:
-                result_df = instance._add_results_to_df(result_df, result_tensors)
-                
-            logger.info("已计算波动性特征 (PyTorch兼容版)")
-            return result_df
-            
-        except Exception as e:
-            logger.error(f"PyTorch兼容层计算波动性特征时出错: {str(e)}")
-            return result_df
+        return instance.calculate_volatility_features(df)
     
     @staticmethod
     def calculate_trend_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        
-        if df is None or df.empty:
-            logger.warning("无法计算空数据的趋势特征")
-            return df
-            
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
-        try:
-            # 将DataFrame转换为张量字典
-            tensor_dict = df_to_tensor(df)
-            
-            # 映射张量字典中的键名
-            mapped_tensor_dict = {}
-            # 尝试匹配常见的列命名
-            for col in df.columns:
-                col_lower = col.lower()
-                if 'open' in col_lower:
-                    mapped_tensor_dict['open'] = tensor_dict[col]
-                elif 'high' in col_lower:
-                    mapped_tensor_dict['high'] = tensor_dict[col]
-                elif 'low' in col_lower:
-                    mapped_tensor_dict['low'] = tensor_dict[col]
-                elif 'close' in col_lower:
-                    mapped_tensor_dict['close'] = tensor_dict[col]
-                elif 'volume' in col_lower:
-                    mapped_tensor_dict['volume'] = tensor_dict[col]
-            
-            # 使用实例方法计算趋势特征
-            result_tensors = instance.calculate_trend_features_tensor(mapped_tensor_dict)
-            
-            # 将计算结果添加回DataFrame
-            if result_tensors:
-                result_df = instance._add_results_to_df(result_df, result_tensors)
-                
-            logger.info("已计算趋势特征 (PyTorch兼容版)")
-            return result_df
-            
-        except Exception as e:
-            logger.error(f"PyTorch兼容层计算趋势特征时出错: {str(e)}")
-            return result_df
+        return instance.calculate_trend_features(df)
     
     @staticmethod
     def calculate_momentum_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        
-        if df is None or df.empty:
-            logger.warning("无法计算空数据的动量特征")
-            return df
-            
-        # 创建副本，避免修改原始数据
-        result_df = df.copy()
-        
-        try:
-            # 将DataFrame转换为张量字典
-            tensor_dict = df_to_tensor(df)
-            
-            # 映射张量字典中的键名
-            mapped_tensor_dict = {}
-            # 尝试匹配常见的列命名
-            for col in df.columns:
-                col_lower = col.lower()
-                if 'open' in col_lower:
-                    mapped_tensor_dict['open'] = tensor_dict[col]
-                elif 'high' in col_lower:
-                    mapped_tensor_dict['high'] = tensor_dict[col]
-                elif 'low' in col_lower:
-                    mapped_tensor_dict['low'] = tensor_dict[col]
-                elif 'close' in col_lower:
-                    mapped_tensor_dict['close'] = tensor_dict[col]
-                elif 'volume' in col_lower:
-                    mapped_tensor_dict['volume'] = tensor_dict[col]
-            
-            # 使用实例方法计算动量特征
-            result_tensors = instance.calculate_momentum_features_tensor(mapped_tensor_dict)
-            
-            # 将计算结果添加回DataFrame
-            if result_tensors:
-                result_df = instance._add_results_to_df(result_df, result_tensors)
-                
-            logger.info("已计算动量特征 (PyTorch兼容版)")
-            return result_df
-            
-        except Exception as e:
-            logger.error(f"PyTorch兼容层计算动量特征时出错: {str(e)}")
-            return result_df 
+        return instance.calculate_momentum_features(df) 
