@@ -14,7 +14,7 @@ import torch
 
 from src.utils.logger import get_logger
 from src.utils.config import load_config
-# 从 pytorch_technical_indicators 导入 GPU 版本的指标计算类
+# 导入原始的 TechnicalIndicators 类
 from src.features.technical_indicators import TechnicalIndicators
 from src.features.microstructure_features import MicrostructureFeatures
 
@@ -74,11 +74,10 @@ class FeatureEngineer:
         # 缩放器
         self.scalers = {}
         
-        # GPU设备
-        self.device = torch.device("cpu") # 默认CPU
-        self.use_gpu = False # 默认不使用GPU
+        # 设备配置 - 固定为CPU
+        self.device = torch.device("cpu")
         
-        logger.info(f"特征工程管道已初始化，使用设备: {self.device}")
+        logger.info(f"特征工程管道已初始化")
         logger.info(f"使用的技术指标计算器: {type(self.tech_indicators).__name__}")
     
     def compute_features(self, df, feature_groups=None):
@@ -258,12 +257,48 @@ class FeatureEngineer:
                 except Exception as e:
                     logger.error(f"处理技术指标映射时出错: {str(e)}")
             
+            # --- 添加组合/衍生信号特征 ---
+            logger.info("开始计算组合/衍生信号特征...")
+            try:
+                # 1. SMA 交叉信号 (5上穿20)
+                if 'sma_5' in result_df.columns and 'sma_20' in result_df.columns:
+                    # 当前周期 sma_5 > sma_20
+                    current_cross = result_df['sma_5'] > result_df['sma_20']
+                    # 上一周期 sma_5 <= sma_20
+                    previous_state = result_df['sma_5'].shift(1) <= result_df['sma_20'].shift(1)
+                    result_df['signal_sma_cross_5_20'] = (current_cross & previous_state).astype(int)
+                else:
+                    logger.warning("缺少 sma_5 或 sma_20 列，无法计算SMA交叉信号")
+
+                # 2. MACD Histogram 正负信号
+                if 'macd_diff' in result_df.columns:
+                    result_df['signal_macd_hist_sign'] = np.sign(result_df['macd_diff']).astype(int)
+                else:
+                    logger.warning("缺少 macd_diff 列，无法计算MACD Histogram信号")
+
+                # 3. RSI 超买/超卖信号 (使用 rsi_14)
+                rsi_col = 'rsi_14' # 假设使用14周期RSI
+                if rsi_col in result_df.columns:
+                    overbought_threshold = 70
+                    oversold_threshold = 30
+                    result_df['signal_rsi_ob_os'] = 0 # 默认为0 (中性)
+                    result_df.loc[result_df[rsi_col] > overbought_threshold, 'signal_rsi_ob_os'] = 1 # 超买
+                    result_df.loc[result_df[rsi_col] < oversold_threshold, 'signal_rsi_ob_os'] = -1 # 超卖
+                else:
+                    logger.warning(f"缺少 {rsi_col} 列，无法计算RSI超买/超卖信号")
+                logger.info("已计算组合/衍生信号特征")
+
+            except Exception as signal_e:
+                logger.error(f"计算组合/衍生信号特征时出错: {str(signal_e)}")
+                # 即使信号计算出错，也保留当前的 result_df
+            
             # 最终检查结果
             if result_df is None or result_df.empty:
                 logger.warning("所有特征计算失败，返回原始数据")
                 result_df = original_df.copy()
             
-            logger.info(f"已计算 {len(result_df.columns) - len(df.columns)} 个特征")
+            calculated_cols = len(result_df.columns) - len(df.columns)
+            logger.info(f"已计算 {calculated_cols} 个特征")
             return result_df
             
         except Exception as e:
@@ -272,19 +307,6 @@ class FeatureEngineer:
             logger.debug(traceback.format_exc())
             # 返回原始DataFrame的副本，确保不会返回None
             return original_df.copy()
-    
-    def compute_features_batch(self, df, feature_groups=None):
-        """
-        计算批次数据的特征 (优化版，可利用GPU)
-        
-        参数:
-            df: DataFrame对象，包含一批数据
-            feature_groups: 要计算的特征组列表
-            
-        返回:
-            包含计算特征的DataFrame
-        """
-        return self.compute_features(df, feature_groups)
     
     def preprocess_features(self, df, scaling=None, fill_na=None, handle_outliers=None):
         """
