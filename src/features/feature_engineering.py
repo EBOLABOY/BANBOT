@@ -113,66 +113,110 @@ class FeatureEngineer:
             window_sizes_list.extend(size_group)
         window_sizes_list = sorted(list(set(window_sizes_list)))
         
-        # 按特征组计算特征
-        if "price_based" in feature_groups:
-            result_df = self.tech_indicators.calculate_price_features(result_df)
-        
-        if "volume_based" in feature_groups:
-            result_df = self.tech_indicators.calculate_volume_features(result_df)
-        
-        if "volatility" in feature_groups:
-            result_df = self.tech_indicators.calculate_volatility_features(result_df)
-        
-        if "trend" in feature_groups:
-            result_df = self.tech_indicators.calculate_trend_features(result_df)
-        
-        if "momentum" in feature_groups:
-            result_df = self.tech_indicators.calculate_momentum_features(result_df)
-        
-        if "market_microstructure" in feature_groups:
-            # 计算市场微观结构特征（如果有相关数据）
-            has_bid_ask = all(col in result_df.columns for col in ['bid', 'ask'])
+        try:
+            # 按特征组计算特征
+            if "price_based" in feature_groups:
+                temp_df = self.tech_indicators.calculate_price_features(result_df)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                else:
+                    logger.warning("价格特征计算返回空结果，跳过并使用原始DataFrame")
             
-            if has_bid_ask:
-                result_df = self.microstructure.calculate_bid_ask_features(result_df)
-                result_df = self.microstructure.calculate_liquidity_features(result_df, window_sizes_list)
+            if "volume_based" in feature_groups:
+                temp_df = self.tech_indicators.calculate_volume_features(result_df)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                else:
+                    logger.warning("交易量特征计算返回空结果，跳过并使用当前DataFrame")
             
-            # 计算其他微观结构特征（基于OHLCV数据）
-            result_df = self.microstructure.calculate_order_flow_features(result_df, window_sizes_list)
-            result_df = self.microstructure.calculate_volatility_clustering(result_df, window_sizes_list)
-            result_df = self.microstructure.calculate_price_impact(result_df, window_sizes_list)
-        
-        # 计算技术指标（如果未在上述特征组中处理）
-        # 将技术指标名称映射到新的结构
-        indicators_mapping = {
-            'MACD': 'momentum',
-            'RSI': 'momentum',
-            'STOCH': 'momentum',
-            'BBANDS': 'volatility',
-            'ATR': 'volatility',
-            'ADX': 'trend',
-            'CCI': 'trend'
-        }
-        
-        # 获取需要计算的指标组
-        needed_groups = set()
-        for ind in ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']:
-            if indicators_mapping.get(ind) not in feature_groups:
-                needed_groups.add(indicators_mapping.get(ind))
-        
-        # 如果有需要单独计算的指标组
-        if needed_groups:
-            try:
-                result_df = self.tech_indicators.calculate_indicators(
-                    result_df, 
-                    indicators=list(needed_groups),
-                    window_sizes=None
-                )
-            except Exception as e:
-                logger.error(f"计算额外技术指标时出错: {str(e)}")
-        
-        logger.info(f"已计算 {len(result_df.columns) - len(df.columns)} 个特征")
-        return result_df
+            if "volatility" in feature_groups:
+                temp_df = self.tech_indicators.calculate_volatility_features(result_df)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                else:
+                    logger.warning("波动性特征计算返回空结果，跳过并使用当前DataFrame")
+            
+            if "trend" in feature_groups:
+                temp_df = self.tech_indicators.calculate_trend_features(result_df)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                else:
+                    logger.warning("趋势特征计算返回空结果，跳过并使用当前DataFrame")
+            
+            if "momentum" in feature_groups:
+                temp_df = self.tech_indicators.calculate_momentum_features(result_df)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                else:
+                    logger.warning("动量特征计算返回空结果，跳过并使用当前DataFrame")
+            
+            if "market_microstructure" in feature_groups:
+                # 计算市场微观结构特征（如果有相关数据）
+                has_bid_ask = all(col in result_df.columns for col in ['bid', 'ask'])
+                
+                if has_bid_ask:
+                    temp_df = self.microstructure.calculate_bid_ask_features(result_df)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                    
+                    temp_df = self.microstructure.calculate_liquidity_features(result_df, window_sizes_list)
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                
+                # 计算其他微观结构特征（基于OHLCV数据）
+                temp_df = self.microstructure.calculate_order_flow_features(result_df, window_sizes_list)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                
+                temp_df = self.microstructure.calculate_volatility_clustering(result_df, window_sizes_list)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+                
+                temp_df = self.microstructure.calculate_price_impact(result_df, window_sizes_list)
+                if temp_df is not None and not temp_df.empty:
+                    result_df = temp_df
+            
+            # 计算技术指标（如果未在上述特征组中处理）
+            # 将技术指标名称映射到新的结构
+            indicators_mapping = {
+                'MACD': 'momentum',
+                'RSI': 'momentum',
+                'STOCH': 'momentum',
+                'BBANDS': 'volatility',
+                'ATR': 'volatility',
+                'ADX': 'trend',
+                'CCI': 'trend'
+            }
+            
+            # 获取需要计算的指标组
+            needed_groups = set()
+            for ind in ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']:
+                if indicators_mapping.get(ind) not in feature_groups:
+                    needed_groups.add(indicators_mapping.get(ind))
+            
+            # 如果有需要单独计算的指标组
+            if needed_groups:
+                try:
+                    temp_df = self.tech_indicators.calculate_indicators(
+                        result_df, 
+                        indicators=list(needed_groups),
+                        window_sizes=None
+                    )
+                    if temp_df is not None and not temp_df.empty:
+                        result_df = temp_df
+                except Exception as e:
+                    logger.error(f"计算额外技术指标时出错: {str(e)}")
+                    # 即使额外指标计算失败，也保留当前的结果_df
+            
+            logger.info(f"已计算 {len(result_df.columns) - len(df.columns)} 个特征")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"特征计算过程中出错: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # 返回原始DataFrame的副本，确保不会返回None
+            return df.copy()
     
     def compute_features_batch(self, df, feature_groups=None):
         """
