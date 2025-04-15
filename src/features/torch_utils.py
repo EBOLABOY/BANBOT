@@ -34,26 +34,80 @@ def set_device(device_str=None):
 
 def df_to_tensor(df, columns=None):
     """
-    将DataFrame转换为PyTorch张量
+    将DataFrame转换为PyTorch张量字典
     
     参数:
         df: pandas DataFrame
         columns: 要转换的列名列表，如果为None则转换所有数值列
         
     返回:
-        (tensor, columns) - PyTorch张量和对应的列名
+        tensor_dict - 包含每列对应张量的字典
     """
-    if columns is None:
-        # 只选择数值类型的列
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if df is None or df.empty:
+        logger.warning("df_to_tensor: 输入DataFrame为空")
+        return {}
     
-    # 从DataFrame中提取数值列
-    data_np = df[columns].values.astype(np.float32)
+    # 创建一个字典，存储每列对应的张量
+    tensor_dict = {}
     
-    # 转换为PyTorch张量
-    data_tensor = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)
+    try:
+        if columns is None:
+            # 只选择数值类型的列
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            columns = numeric_cols
+            logger.debug(f"df_to_tensor: 自动选择的数值列: {columns}")
+        
+        # 规范化列名 (小写处理)
+        col_mapping = {}
+        for col in columns:
+            col_mapping[col.lower()] = col
+        
+        # 匹配常见的OHLCV列名
+        standard_cols = {
+            'open': ['open', 'o', 'open_price', 'opening_price'],
+            'high': ['high', 'h', 'high_price', 'highest_price'],
+            'low': ['low', 'l', 'low_price', 'lowest_price'],
+            'close': ['close', 'c', 'close_price', 'closing_price'],
+            'volume': ['volume', 'v', 'vol', 'quantity']
+        }
+        
+        # 尝试标准化列名
+        for standard_col, variants in standard_cols.items():
+            for variant in variants:
+                if variant in col_mapping:
+                    tensor_dict[standard_col] = torch.tensor(
+                        df[col_mapping[variant]].values.astype(np.float32), 
+                        dtype=torch.float32, 
+                        device=DEVICE
+                    )
+                    break
+        
+        # 针对每一列创建张量 (包括非标准列名)
+        for col in columns:
+            # 如果已经在标准化列中处理过，则跳过
+            if col.lower() in [variant for variants in standard_cols.values() for variant in variants]:
+                if any(col.lower() == variant for variant in variants for standard_col, variants in standard_cols.items() if standard_col in tensor_dict):
+                    continue
+            
+            # 从DataFrame中提取数值列
+            try:
+                data_np = df[col].values.astype(np.float32)
+                
+                # 转换为PyTorch张量
+                tensor_dict[col] = torch.tensor(data_np, dtype=torch.float32, device=DEVICE)
+            except Exception as e:
+                logger.warning(f"df_to_tensor: 无法转换列 {col} 为张量: {str(e)}")
     
-    return data_tensor, columns
+    except Exception as e:
+        logger.error(f"df_to_tensor: 处理DataFrame时出错: {str(e)}")
+    
+    # 检查输出
+    if not tensor_dict:
+        logger.warning("df_to_tensor: 未能创建任何张量，返回空字典")
+    else:
+        logger.debug(f"df_to_tensor: 成功创建张量字典，键名: {list(tensor_dict.keys())}")
+    
+    return tensor_dict
 
 def tensor_to_df(tensor, columns, index=None):
     """

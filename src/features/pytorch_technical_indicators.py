@@ -652,75 +652,139 @@ class PyTorchTechnicalIndicators:
         # 创建副本，避免修改原始数据
         result_df = df.copy()
         
-        # 将DataFrame转换为张量字典，确保列名映射正确
-        col_mapping = {
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume'
-        }
-        
-        # 查找实际的列名
-        actual_cols = {}
-        for standard_col, default_name in col_mapping.items():
-            for col in df.columns:
-                if col.lower() == default_name:
-                    actual_cols[standard_col] = col
-                    break
-            # 如果没找到，保留默认名称
-            if standard_col not in actual_cols:
-                actual_cols[standard_col] = default_name
+        try:
+            # 查找数据中的OHLCV列
+            ohlcv_candidates = {
+                'open': ['open', 'o', 'open_price'],
+                'high': ['high', 'h', 'high_price'],
+                'low': ['low', 'l', 'low_price'],
+                'close': ['close', 'c', 'close_price', 'adj_close', 'adjusted_close'],
+                'volume': ['volume', 'v', 'vol', 'volume_traded']
+            }
+            
+            # 查找实际的列名
+            actual_cols = {}
+            cols_found = []
+            for standard_col, candidates in ohlcv_candidates.items():
+                for col in df.columns:
+                    if col.lower() in [c.lower() for c in candidates]:
+                        actual_cols[standard_col] = col
+                        cols_found.append(standard_col)
+                        break
+            
+            # 记录找到的列
+            if cols_found:
+                logger.debug(f"找到的OHLCV列: {cols_found}")
+            else:
+                logger.warning("未找到任何OHLCV列，将使用原始列名")
                 
-        # 将DataFrame转换为张量字典
-        tensor_dict = df_to_tensor(df)
-        
-        # 映射张量字典中的键名
-        mapped_tensor_dict = {}
-        for standard_col, actual_col in actual_cols.items():
-            if actual_col in tensor_dict:
-                mapped_tensor_dict[standard_col] = tensor_dict[actual_col]
-        
-        # 根据indicators参数决定计算哪些指标
-        all_indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
-        if indicators is None:
-            indicators = all_indicators
-        
-        # 计算各类特征
-        result_tensors = {}
-        
-        if 'price' in indicators:
-            logger.debug("计算价格特征...")
-            price_features = self.calculate_price_features_tensor(mapped_tensor_dict)
-            result_tensors.update(price_features)
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
             
-        if 'volume' in indicators and 'volume' in mapped_tensor_dict:
-            logger.debug("计算交易量特征...")
-            volume_features = self.calculate_volume_features_tensor(mapped_tensor_dict)
-            result_tensors.update(volume_features)
+            # 将找到的列映射到标准名称
+            mapped_tensor_dict = {}
+            for standard_col, actual_col in actual_cols.items():
+                if actual_col in tensor_dict:
+                    mapped_tensor_dict[standard_col] = tensor_dict[actual_col]
+                elif actual_col.lower() in tensor_dict:
+                    # 尝试使用小写名称
+                    mapped_tensor_dict[standard_col] = tensor_dict[actual_col.lower()]
             
-        if 'volatility' in indicators:
-            logger.debug("计算波动性特征...")
-            volatility_features = self.calculate_volatility_features_tensor(mapped_tensor_dict)
-            result_tensors.update(volatility_features)
+            # 如果映射的字典为空，使用原始的张量字典
+            if not mapped_tensor_dict:
+                logger.warning("映射后的张量字典为空，使用原始张量字典")
+                # 尝试直接从原始字典中查找OHLCV列
+                for standard_col in ['open', 'high', 'low', 'close', 'volume']:
+                    if standard_col in tensor_dict:
+                        mapped_tensor_dict[standard_col] = tensor_dict[standard_col]
+                    elif standard_col.lower() in tensor_dict:
+                        mapped_tensor_dict[standard_col] = tensor_dict[standard_col.lower()]
             
-        if 'trend' in indicators:
-            logger.debug("计算趋势特征...")
-            trend_features = self.calculate_trend_features_tensor(mapped_tensor_dict)
-            result_tensors.update(trend_features)
+            # 检查是否有必要的键
+            required_keys = ['open', 'high', 'low', 'close']
+            missing_keys = [key for key in required_keys if key not in mapped_tensor_dict]
+            if missing_keys:
+                logger.warning(f"张量字典缺少必要的键: {missing_keys}，某些特征可能无法计算")
+                # 尝试从原始张量字典中复制必要的键
+                for key in missing_keys:
+                    # 使用可能的替代键
+                    for alt_key in tensor_dict.keys():
+                        if key in alt_key.lower():
+                            mapped_tensor_dict[key] = tensor_dict[alt_key]
+                            logger.debug(f"使用 {alt_key} 替代 {key}")
+                            break
             
-        if 'momentum' in indicators:
-            logger.debug("计算动量特征...")
-            momentum_features = self.calculate_momentum_features_tensor(mapped_tensor_dict)
-            result_tensors.update(momentum_features)
-        
-        # 将结果添加回DataFrame
-        result_df = self._add_results_to_df(result_df, result_tensors)
-        
-        end_time = time.time()
-        calculation_time = end_time - start_time
-        logger.info(f"已计算技术指标 (PyTorch版): {', '.join(indicators)} (耗时: {calculation_time:.2f}秒)")
-        return result_df
+            # 根据indicators参数决定计算哪些指标
+            all_indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
+            if indicators is None:
+                indicators = all_indicators
+            elif isinstance(indicators, list) and indicators and isinstance(indicators[0], str):
+                # 检查是否是传统的指标名称
+                traditional_indicators = ['MACD', 'RSI', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'CCI']
+                if any(ind.upper() in traditional_indicators for ind in indicators):
+                    # 创建映射
+                    indicator_map = {
+                        'MACD': 'momentum', 'RSI': 'momentum', 'STOCH': 'momentum',
+                        'BBANDS': 'volatility', 'ATR': 'volatility',
+                        'ADX': 'trend', 'CCI': 'trend'
+                    }
+                    # 转换为新的分类
+                    converted_indicators = set()
+                    for ind in indicators:
+                        mapped_ind = indicator_map.get(ind.upper())
+                        if mapped_ind:
+                            converted_indicators.add(mapped_ind)
+                    
+                    # 如果有转换后的指标，使用它们
+                    if converted_indicators:
+                        indicators = list(converted_indicators)
+                    else:
+                        # 如果没有映射成功，使用所有分类
+                        indicators = all_indicators
+            
+            # 计算各类特征
+            result_tensors = {}
+            
+            if 'price' in indicators and all(k in mapped_tensor_dict for k in ['open', 'high', 'low', 'close']):
+                logger.debug("计算价格特征...")
+                price_features = self.calculate_price_features_tensor(mapped_tensor_dict)
+                result_tensors.update(price_features)
+                
+            if 'volume' in indicators and 'volume' in mapped_tensor_dict and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
+                logger.debug("计算交易量特征...")
+                volume_features = self.calculate_volume_features_tensor(mapped_tensor_dict)
+                result_tensors.update(volume_features)
+                
+            if 'volatility' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
+                logger.debug("计算波动性特征...")
+                volatility_features = self.calculate_volatility_features_tensor(mapped_tensor_dict)
+                result_tensors.update(volatility_features)
+                
+            if 'trend' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
+                logger.debug("计算趋势特征...")
+                trend_features = self.calculate_trend_features_tensor(mapped_tensor_dict)
+                result_tensors.update(trend_features)
+                
+            if 'momentum' in indicators and all(k in mapped_tensor_dict for k in ['high', 'low', 'close']):
+                logger.debug("计算动量特征...")
+                momentum_features = self.calculate_momentum_features_tensor(mapped_tensor_dict)
+                result_tensors.update(momentum_features)
+            
+            # 将计算的特征结果添加回DataFrame
+            if result_tensors:
+                result_df = self._add_results_to_df(result_df, result_tensors)
+                
+            # 性能日志
+            end_time = time.time()
+            calculation_time = end_time - start_time
+            logger.info(f"已计算技术指标 (PyTorch版): {', '.join(indicators)} (耗时: {calculation_time:.2f}秒)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"计算技术指标时出错: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return result_df
     
     def calculate_price_features(self, df):
         """

@@ -623,36 +623,23 @@ class FeatureEngineer:
                 
                 logger.info(f"数据大小为 {total_rows} 行，启用批处理 (每批 {batch_size} 行)")
                 
-                # 分配存储结果的空间
-                all_features = []
-                all_targets = []
+                # 直接读取整个文件，然后分批处理
+                # 这样可以避免每个批次都重新读取文件的开销
+                logger.info("读取整个文件，然后分批处理...")
+                df = pd.read_csv(filepath)
                 
-                # 分批次处理数据
-                for i, chunk in enumerate(pd.read_csv(filepath, chunksize=batch_size)):
-                    batch_start = i * batch_size
-                    batch_end = min(batch_start + batch_size, total_rows)
-                    logger.info(f"处理批次 {i+1}/{(total_rows + batch_size - 1) // batch_size} (行 {batch_start} 到 {batch_end})")
-                    
-                    # 设置时间戳为索引
-                    if 'timestamp' in chunk.columns:
-                        chunk.set_index('timestamp', inplace=True)
-                    
-                    # 计算特征
-                    features_df_batch = self.compute_features_batch(chunk)
-                    
-                    # 创建目标变量
-                    targets_df_batch = self.create_target_variables(features_df_batch)
-                    
-                    # 预处理特征
-                    features_df_batch = self.preprocess_features(features_df_batch)
-                    
-                    # 将批次结果添加到列表
-                    all_features.append(features_df_batch)
-                    all_targets.append(targets_df_batch)
+                # 设置时间戳为索引
+                if 'timestamp' in df.columns:
+                    df.set_index('timestamp', inplace=True)
                 
-                # 合并批次结果
-                features_df = pd.concat(all_features)
-                targets_df = pd.concat(all_targets)
+                # 分批处理特征计算
+                features_df = self.compute_features(df)
+                
+                # 创建目标变量
+                targets_df = self.create_target_variables(features_df)
+                
+                # 预处理特征
+                features_df = self.preprocess_features(features_df)
                 
             else:
                 # 对于较小的文件，直接读取
@@ -662,14 +649,14 @@ class FeatureEngineer:
                 if 'timestamp' in df.columns:
                     df.set_index('timestamp', inplace=True)
             
-            # 计算特征
-            features_df = self.compute_features(df)
-            
-            # 创建目标变量
-            targets_df = self.create_target_variables(features_df)
-            
-            # 预处理特征
-            features_df = self.preprocess_features(features_df)
+                # 计算特征
+                features_df = self.compute_features(df)
+                
+                # 创建目标变量
+                targets_df = self.create_target_variables(features_df)
+                
+                # 预处理特征
+                features_df = self.preprocess_features(features_df)
             
             # 将时间戳设为列而非索引，方便后续处理
             if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
