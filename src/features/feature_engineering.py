@@ -456,9 +456,75 @@ class FeatureEngineer:
         logger.info(f"已创建 {len(horizons)} 个目标变量")
         return result_df
     
+    def load_data(self, filepath):
+        """
+        加载数据文件 - 优化版本
+        
+        参数:
+            filepath: 文件路径
+            
+        返回:
+            加载的DataFrame
+        """
+        try:
+            # 读取CSV文件，使用更高效的引擎和方式
+            # 1. 使用c引擎而非python引擎
+            # 2. 只加载必要的列
+            # 3. 使用适当的数据类型
+            # 4. 通过chunksize处理大文件
+            
+            # 先尝试检查文件的列名
+            import csv
+            with open(filepath, 'r') as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+            
+            # 确定必要的列
+            essential_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            usecols = [col for col in headers if col in essential_cols]
+            
+            # 设置dtypes加速加载
+            dtypes = {
+                'open': 'float32',
+                'high': 'float32',
+                'low': 'float32',
+                'close': 'float32',
+                'volume': 'float32'
+            }
+            
+            # 如果文件非常大，使用分块读取
+            file_size = os.path.getsize(filepath)
+            chunk_size = 500000 if file_size > 100*1024*1024 else None  # 100MB以上使用分块
+            
+            if chunk_size:
+                logger.info(f"文件 {filepath} 较大 ({file_size/1024/1024:.1f}MB)，使用分块读取")
+                chunks = []
+                for chunk in pd.read_csv(filepath, usecols=usecols, dtype=dtypes, chunksize=chunk_size, engine='c'):
+                    # 处理timestamp
+                    if "timestamp" in chunk.columns:
+                        chunk["timestamp"] = pd.to_datetime(chunk["timestamp"])
+                    chunks.append(chunk)
+                df = pd.concat(chunks)
+            else:
+                df = pd.read_csv(filepath, usecols=usecols, dtype=dtypes, engine='c')
+                # 处理timestamp
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+            
+            # 设置索引
+            if "timestamp" in df.columns:
+                df.set_index("timestamp", inplace=True)
+            
+            logger.debug(f"已加载数据文件 {filepath}，共 {len(df)} 条记录")
+            return df
+            
+        except Exception as e:
+            logger.error(f"加载数据文件 {filepath} 时出错: {e}")
+            return pd.DataFrame()
+    
     def process_data_for_symbol(self, symbol, timeframe, start_date=None, end_date=None, data_dir="data/processed/merged", batch_size=None):
         """
-        为单个交易对处理数据
+        为单个交易对处理数据 - 优化版本
         
         参数:
             symbol: 交易对符号
@@ -536,18 +602,33 @@ class FeatureEngineer:
         output_dir = os.path.join(self.features_path, symbol)
         os.makedirs(output_dir, exist_ok=True)
         
+        # 确定文件名后缀
+        date_suffix = ""
+        if start_date:
+            date_suffix += f"_{start_date.replace('-', '')}"
+        if end_date:
+            date_suffix += f"_{end_date.replace('-', '')}"
+        
         # 准备分批处理
         if batch_size and len(df) > batch_size:
             logger.info(f"数据大小为 {len(df)} 行，启用批处理 (每批 {batch_size} 行)")
             
-            # 预先创建空的结果DataFrame
-            features_df_all = pd.DataFrame()
-            targets_df_all = pd.DataFrame()
-            
             # 计算批次数
             num_batches = (len(df) + batch_size - 1) // batch_size
             
-            # 分批处理
+            # 初始化内存优化选项
+            use_parquet = True  # 使用Parquet中间文件存储批次结果
+            temp_dir = os.path.join(output_dir, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # 创建输出文件路径
+            features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
+            targets_filepath = os.path.join(output_dir, f"targets_{timeframe}{date_suffix}.csv")
+            
+            # 处理所有批次
+            feature_files = []
+            target_files = []
+            
             for i in range(num_batches):
                 batch_start = i * batch_size
                 batch_end = min((i + 1) * batch_size, len(df))
@@ -566,32 +647,80 @@ class FeatureEngineer:
                 # 处理特征
                 batch_processed_features = self.preprocess_features(batch_features_df)
                 
-                # 添加到结果
-                features_df_all = pd.concat([features_df_all, batch_processed_features])
-                targets_df_all = pd.concat([targets_df_all, batch_targets_df])
+                if use_parquet:
+                    # 保存批次结果到临时parquet文件
+                    batch_feature_file = os.path.join(temp_dir, f"batch_{i}_features.parquet")
+                    batch_target_file = os.path.join(temp_dir, f"batch_{i}_targets.parquet")
+                    
+                    batch_processed_features.to_parquet(batch_feature_file)
+                    batch_targets_df.to_parquet(batch_target_file)
+                    
+                    feature_files.append(batch_feature_file)
+                    target_files.append(batch_target_file)
+                    
+                    # 释放内存
+                    del batch_df, batch_features_df, batch_targets_df, batch_processed_features
+                else:
+                    # 添加到结果
+                    if i == 0:
+                        # 第一个批次，直接写入文件
+                        batch_processed_features.to_csv(features_filepath)
+                        batch_targets_df.to_csv(targets_filepath)
+                    else:
+                        # 后续批次，追加到文件
+                        batch_processed_features.to_csv(features_filepath, mode='a', header=False)
+                        batch_targets_df.to_csv(targets_filepath, mode='a', header=False)
+                    
+                    # 释放内存
+                    del batch_df, batch_features_df, batch_targets_df, batch_processed_features
                 
-                # 释放内存
-                del batch_df, batch_features_df, batch_targets_df, batch_processed_features
+                # 强制垃圾回收
                 import gc
                 gc.collect()
             
-            # 确定文件名后缀
-            date_suffix = ""
-            if start_date:
-                date_suffix += f"_{start_date.replace('-', '')}"
-            if end_date:
-                date_suffix += f"_{end_date.replace('-', '')}"
-            
-            # 保存特征和目标变量
-            features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
-            targets_filepath = os.path.join(output_dir, f"targets_{timeframe}{date_suffix}.csv")
-            
-            features_df_all.to_csv(features_filepath)
-            targets_df_all.to_csv(targets_filepath)
-            
-            logger.info(f"已保存 {symbol} 的 {timeframe} 特征和目标变量，共 {len(features_df_all)} 条记录和 {len(features_df_all.columns)} 个特征")
-            
-            return features_df_all, targets_df_all
+            # 如果使用parquet，合并所有批次结果
+            if use_parquet:
+                # 合并特征文件
+                all_features = []
+                for file in feature_files:
+                    batch = pd.read_parquet(file)
+                    all_features.append(batch)
+                
+                features_df_all = pd.concat(all_features)
+                features_df_all.to_csv(features_filepath)
+                
+                # 合并目标文件
+                all_targets = []
+                for file in target_files:
+                    batch = pd.read_parquet(file)
+                    all_targets.append(batch)
+                
+                targets_df_all = pd.concat(all_targets)
+                targets_df_all.to_csv(targets_filepath)
+                
+                # 清理临时文件
+                for file in feature_files + target_files:
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+                
+                try:
+                    os.rmdir(temp_dir)
+                except:
+                    pass
+                
+                logger.info(f"已保存 {symbol} 的 {timeframe} 特征和目标变量，共 {len(features_df_all)} 条记录和 {len(features_df_all.columns)} 个特征")
+                
+                return features_df_all, targets_df_all
+            else:
+                # 直接读取已保存的CSV文件
+                features_df_all = pd.read_csv(features_filepath)
+                targets_df_all = pd.read_csv(targets_filepath)
+                
+                logger.info(f"已保存 {symbol} 的 {timeframe} 特征和目标变量，共 {len(features_df_all)} 条记录和 {len(features_df_all.columns)} 个特征")
+                
+                return features_df_all, targets_df_all
         else:
             # 正常处理（不分批）
             # 计算特征
@@ -602,13 +731,6 @@ class FeatureEngineer:
             
             # 处理特征
             processed_features = self.preprocess_features(features_df)
-            
-            # 确定文件名后缀
-            date_suffix = ""
-            if start_date:
-                date_suffix += f"_{start_date.replace('-', '')}"
-            if end_date:
-                date_suffix += f"_{end_date.replace('-', '')}"
             
             # 保存特征和目标变量
             features_filepath = os.path.join(output_dir, f"features_{timeframe}{date_suffix}.csv")
@@ -698,30 +820,4 @@ class FeatureEngineer:
                 gc.collect()
         
         logger.info(f"已处理 {len(processed_data)} 个交易对的数据")
-        return processed_data
-    
-    def load_data(self, filepath):
-        """
-        加载数据文件
-        
-        参数:
-            filepath: 文件路径
-            
-        返回:
-            加载的DataFrame
-        """
-        try:
-            # 读取CSV文件
-            df = pd.read_csv(filepath)
-            
-            # 尝试将timestamp列转换为日期时间格式并设为索引
-            if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-                df.set_index("timestamp", inplace=True)
-            
-            logger.debug(f"已加载数据文件 {filepath}，共 {len(df)} 条记录")
-            return df
-            
-        except Exception as e:
-            logger.error(f"加载数据文件 {filepath} 时出错: {e}")
-            return pd.DataFrame() 
+        return processed_data 
