@@ -144,13 +144,19 @@ def rolling_window(tensor, window_size):
         
     返回:
         如果输入是 1D: 形状为 [N-window_size+1, window_size] 的张量
-        如果输入是 2D: 形状为 [N-window_size+1, window_size, C] 的张量
+        如果输入是 2D: 形状为 [N-window_size+1, C, window_size] 的张量
     """
-    # 确保输入张量是二维的
-    if tensor.dim() == 1:
+    original_dim = tensor.dim()
+    # 确保输入张量是二维的 [N, C]
+    if original_dim == 1:
         tensor = tensor.unsqueeze(1)
+    n_samples, n_features = tensor.shape
     logger.debug(f"rolling_window: 输入张量形状 {tensor.shape}, 窗口大小 {window_size}")
+    # unfold 操作
+    # unfold(dimension, size, step)
+    # 对第0维（样本维）进行展开，每个窗口大小为window_size，步长为1
     windows = tensor.unfold(0, window_size, 1)
+    # 结果形状为 [N-window_size+1, C, window_size]
     logger.debug(f"rolling_window: 返回窗口形状 {windows.shape}")
     return windows
 
@@ -164,33 +170,46 @@ def moving_average(tensor, window_size, weights=None):
         weights: 权重张量，形状为 [window_size]，如果为None则计算简单移动平均
         
     返回:
-        移动平均结果张量，保持与输入相同的维度
+        移动平均结果张量，形状为 [N, C]
     """
+    original_dim = tensor.dim()
     if isinstance(tensor, np.ndarray):
         tensor = torch.tensor(tensor, dtype=torch.float32, device=DEVICE)
+    # 确保输入是2D [N, C]
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(1)
     n_samples, n_features = tensor.shape
     logger.debug(f"moving_average: 输入张量形状 {tensor.shape}, 窗口 {window_size}")
     try:
+        # rolling_window 返回 [N-window_size+1, C, window_size]
         windows = rolling_window(tensor, window_size)
         nan_mask = torch.isnan(windows)
         windows = torch.where(nan_mask, torch.zeros_like(windows), windows)
+        
         if weights is not None:
             weights = weights.to(DEVICE)
-            if windows.dim() == 3:
-                ma = torch.sum(windows * weights.view(1, -1, 1), dim=1) / torch.sum(weights)
-            else:
-                ma = torch.sum(windows * weights.view(1, -1), dim=1) / torch.sum(weights)
+            # weights 形状 [window_size], 调整为 [1, 1, window_size] 进行广播
+            ma = torch.sum(windows * weights.view(1, 1, -1), dim=2) / torch.sum(weights)
+            # ma 形状 [N-window_size+1, C]
         else:
-            ma = torch.nanmean(windows, dim=1)
+            # 计算简单移动平均，对最后一个维度（窗口维度）求平均
+            ma = torch.nanmean(windows, dim=2)
+            # ma 形状 [N-window_size+1, C]
+            
         result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
         result[window_size-1:] = ma
+        # 恢复原始维度
+        if original_dim == 1:
+            result = result.squeeze(1)
         logger.debug(f"moving_average: 返回张量形状 {result.shape}")
         return result
     except Exception as e:
         logger.error(f"moving_average计算错误: {str(e)}")
-        return torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        # 发生错误时返回与输入形状相同的NaN张量
+        error_result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        if original_dim == 1:
+            error_result = error_result.squeeze(1)
+        return error_result
 
 def ewma(tensor, span, adjust=False):
     """
