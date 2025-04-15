@@ -645,6 +645,9 @@ class FeatureEngineer:
             file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
             use_chunking = file_size_mb > 100 or batch_size is not None
             
+            # 加载数据
+            df = None
+            
             if use_chunking:
                 logger.info(f"文件 {filepath} 较大 ({file_size_mb:.1f}MB)，使用分块读取")
                 
@@ -667,66 +670,80 @@ class FeatureEngineer:
                 
                 logger.info(f"数据大小为 {total_rows} 行，启用批处理 (每批 {batch_size} 行)")
                 
-                # 直接读取整个文件，然后分批处理
-                # 这样可以避免每个批次都重新读取文件的开销
-                logger.info("读取整个文件，然后分批处理...")
-                df = pd.read_csv(filepath)
-                
-                # 设置时间戳为索引
-                if 'timestamp' in df.columns:
-                    df.set_index('timestamp', inplace=True)
-                
-                # 初始化变量
-                features_df = None
-                targets_df = None
-                
                 try:
-                    # 分批处理特征计算
-                    features_df = self.compute_features(df)
-                    
-                    # 创建目标变量
-                    if features_df is not None:
-                        targets_df = self.create_target_variables(features_df)
-                    
-                    # 预处理特征
-                    if features_df is not None:
-                        features_df = self.preprocess_features(features_df)
-                except Exception as inner_e:
-                    logger.error(f"处理 {filepath} 特征计算阶段出错: {str(inner_e)}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    # 确保在特征计算错误时返回None
+                    # 直接读取整个文件，然后分批处理
+                    logger.info("读取整个文件，然后分批处理...")
+                    df = pd.read_csv(filepath)
+                except Exception as load_e:
+                    logger.error(f"读取文件 {filepath} 时出错: {str(load_e)}")
                     return None, None
-                
             else:
                 # 对于较小的文件，直接读取
-                df = pd.read_csv(filepath)
-                
-                # 设置时间戳为索引
-                if 'timestamp' in df.columns:
-                    df.set_index('timestamp', inplace=True)
-            
-                # 初始化变量
-                features_df = None
-                targets_df = None
-                
                 try:
-                    # 计算特征
+                    df = pd.read_csv(filepath)
+                except Exception as load_e:
+                    logger.error(f"读取文件 {filepath} 时出错: {str(load_e)}")
+                    return None, None
+            
+            # 确保数据加载成功
+            if df is None or df.empty:
+                logger.warning(f"文件 {filepath} 数据为空或加载失败")
+                return None, None
+                
+            # 设置时间戳为索引
+            if 'timestamp' in df.columns:
+                df.set_index('timestamp', inplace=True)
+            
+            # 初始化变量
+            features_df = None
+            targets_df = None
+            
+            # 整体异常处理
+            try:
+                # 分批处理特征计算
+                logger.info(f"开始计算 {symbol} {timeframe} 特征...")
+                try:
                     features_df = self.compute_features(df)
-                    
-                    # 创建目标变量
-                    if features_df is not None:
-                        targets_df = self.create_target_variables(features_df)
-                    
-                    # 预处理特征
-                    if features_df is not None:
-                        features_df = self.preprocess_features(features_df)
-                except Exception as inner_e:
-                    logger.error(f"处理 {filepath} 特征计算阶段出错: {str(inner_e)}")
+                    if features_df is None or features_df.empty:
+                        logger.warning(f"计算 {symbol} {timeframe} 特征失败，返回空DataFrame")
+                        return None, None
+                except Exception as feature_e:
+                    logger.error(f"计算 {symbol} {timeframe} 特征时出错: {str(feature_e)}")
                     import traceback
                     logger.debug(traceback.format_exc())
-                    # 确保在特征计算错误时返回None
                     return None, None
+                
+                # 创建目标变量
+                logger.info(f"开始为 {symbol} {timeframe} 创建目标变量...")
+                try:
+                    targets_df = self.create_target_variables(features_df)
+                    if targets_df is None or targets_df.empty:
+                        logger.warning(f"为 {symbol} {timeframe} 创建目标变量失败，返回空DataFrame")
+                        return None, None
+                except Exception as target_e:
+                    logger.error(f"为 {symbol} {timeframe} 创建目标变量时出错: {str(target_e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    return None, None
+                
+                # 预处理特征
+                logger.info(f"开始为 {symbol} {timeframe} 预处理特征...")
+                try:
+                    features_df = self.preprocess_features(features_df)
+                    if features_df is None or features_df.empty:
+                        logger.warning(f"为 {symbol} {timeframe} 预处理特征失败，返回空DataFrame")
+                        return None, None
+                except Exception as preprocess_e:
+                    logger.error(f"为 {symbol} {timeframe} 预处理特征时出错: {str(preprocess_e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    return None, None
+                
+            except Exception as general_e:
+                logger.error(f"处理 {filepath} 总体流程出错: {str(general_e)}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                return None, None
             
             # 检查处理是否成功
             if features_df is None or targets_df is None:
@@ -734,24 +751,37 @@ class FeatureEngineer:
                 return None, None
             
             # 将时间戳设为列而非索引，方便后续处理
-            if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
-                features_df.reset_index(inplace=True)
-            
-            if isinstance(targets_df.index, pd.DatetimeIndex) or targets_df.index.name == 'timestamp':
-                targets_df.reset_index(inplace=True)
+            try:
+                if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
+                    features_df.reset_index(inplace=True)
+                
+                if isinstance(targets_df.index, pd.DatetimeIndex) or targets_df.index.name == 'timestamp':
+                    targets_df.reset_index(inplace=True)
+            except Exception as reset_e:
+                logger.error(f"重置索引时出错: {str(reset_e)}")
+                # 尝试恢复处理
+                try:
+                    features_df = features_df.reset_index()
+                    targets_df = targets_df.reset_index()
+                except:
+                    pass
             
             # 创建输出目录
-            output_dir = os.path.join(self.features_path, symbol)
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # 保存特征和目标变量
-            features_file = os.path.join(output_dir, f"features_{timeframe}.csv")
-            targets_file = os.path.join(output_dir, f"targets_{timeframe}.csv")
-            
-            features_df.to_csv(features_file, index=False)
-            targets_df.to_csv(targets_file, index=False)
-            
-            logger.info(f"已处理 {symbol} {timeframe} 数据并保存至 {output_dir}")
+            try:
+                output_dir = os.path.join(self.features_path, symbol)
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # 保存特征和目标变量
+                features_file = os.path.join(output_dir, f"features_{timeframe}.csv")
+                targets_file = os.path.join(output_dir, f"targets_{timeframe}.csv")
+                
+                features_df.to_csv(features_file, index=False)
+                targets_df.to_csv(targets_file, index=False)
+                
+                logger.info(f"已处理 {symbol} {timeframe} 数据并保存至 {output_dir}")
+            except Exception as save_e:
+                logger.error(f"保存结果到 {output_dir} 时出错: {str(save_e)}")
+                # 即使保存失败，也返回结果
             
             return features_df, targets_df
             
