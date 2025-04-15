@@ -195,7 +195,11 @@ class PyTorchTechnicalIndicators:
             if window > 0 and window <= len(close):
                 high_windows = rolling_window(high, window)
                 low_windows = rolling_window(low, window)
-                # Ensure window calculation didn't return empty
+                # 降维，rolling_window后立即 squeeze(1)
+                if high_windows.dim() == 3 and high_windows.shape[1] == 1:
+                    high_windows = high_windows.squeeze(1)
+                if low_windows.dim() == 3 and low_windows.shape[1] == 1:
+                    low_windows = low_windows.squeeze(1)
                 if high_windows.shape[0] == 0 or low_windows.shape[0] == 0:
                     logger.debug(f"价格相对位置窗口大小 {window} 无效或大于数据长度")
                     continue
@@ -219,6 +223,9 @@ class PyTorchTechnicalIndicators:
         if volatility_window > 0 and volatility_window <= len(price_change_pct):
             price_change_pct_nonan = torch.where(torch.isnan(price_change_pct), torch.zeros_like(price_change_pct), price_change_pct)
             windows = rolling_window(price_change_pct_nonan, volatility_window)
+            # 降维，rolling_window后立即 squeeze(1)
+            if windows.dim() == 3 and windows.shape[1] == 1:
+                windows = windows.squeeze(1)
             if windows.shape[0] > 0:
                 volatility = torch.std(windows, dim=1, unbiased=True, keepdim=True)
                 volatility_full = torch.full_like(close, float('nan'))
@@ -268,7 +275,11 @@ class PyTorchTechnicalIndicators:
         for window in [5, 10, 20, 50]:
             if window > 0 and window <= len(volume):
                 volume_ma = moving_average(volume, window)
-                rel_volume = volume / (volume_ma + 1e-10)
+                # 降维，moving_average后立即 squeeze(1)
+                if volume_ma.dim() == 2 and volume_ma.shape[1] == 1:
+                    rel_volume = volume / (volume_ma + 1e-10)
+                else:
+                    rel_volume = volume / (volume_ma.squeeze(1) + 1e-10)
                 result_tensors[f'rel_volume_{window}'] = rel_volume
             else:
                 logger.debug(f"相对交易量窗口大小 {window} 无效或大于数据长度")
@@ -504,6 +515,9 @@ class PyTorchTechnicalIndicators:
                 
                 # 计算过去n期的价格变化率
                 shifted_close = torch.cat([torch.full((window, close.size(1)), float('nan'), device=close.device), close[:-window]], dim=0)
+                # 降维，shifted_close后立即 squeeze(1)
+                if shifted_close.dim() == 3 and shifted_close.shape[1] == 1:
+                    shifted_close = shifted_close.squeeze(1)
                 non_zero_mask = shifted_close != 0
                 momentum = torch.zeros_like(close)
                 momentum[non_zero_mask] = (close[non_zero_mask] / shifted_close[non_zero_mask]) - 1.0
@@ -682,6 +696,10 @@ class PyTorchTechnicalIndicators:
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, stds], dim=0)
                 
+                # 降维，rolling_window后立即 squeeze(1)
+                if result.dim() == 3 and result.shape[1] == 1:
+                    result = result.squeeze(1)
+                
                 return result
             else:
                 logger.warning(f"滚动标准差计算窗口大小 {window} 大于批次大小 {batch_size}")
@@ -719,6 +737,10 @@ class PyTorchTechnicalIndicators:
                 padding = torch.full((window-1, features), float('nan'), 
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, max_values], dim=0)
+                
+                # 降维，rolling_window后立即 squeeze(1)
+                if result.dim() == 3 and result.shape[1] == 1:
+                    result = result.squeeze(1)
                 
                 return result
             else:
@@ -758,6 +780,10 @@ class PyTorchTechnicalIndicators:
                                     device=tensor.device, dtype=tensor.dtype)
                 result = torch.cat([padding, min_values], dim=0)
                 
+                # 降维，rolling_window后立即 squeeze(1)
+                if result.dim() == 3 and result.shape[1] == 1:
+                    result = result.squeeze(1)
+                
                 return result
             else:
                 logger.warning(f"滚动最小值计算窗口大小 {window} 大于批次大小 {batch_size}")
@@ -794,6 +820,9 @@ class PyTorchTechnicalIndicators:
                 # 恢复原始形状
                 if original_dim > 1:
                     result = result.view(original_shape)
+                # 降维，rolling_window后立即 squeeze(1)
+                if result.dim() == 3 and result.shape[1] == 1:
+                    result = result.squeeze(1)
                 return result
             else:
                 logger.warning(f"无法为 {window} 窗口生成滚动平均值")
@@ -833,6 +862,10 @@ class PyTorchTechnicalIndicators:
             # 恢复原始形状
             if original_dim > 1:
                 result = result.view(original_shape)
+            
+            # 降维，rolling_window后立即 squeeze(1)
+            if result.dim() == 3 and result.shape[1] == 1:
+                result = result.squeeze(1)
             
             return result
         except Exception as e:
