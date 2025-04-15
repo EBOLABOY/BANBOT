@@ -82,28 +82,33 @@ def main():
         # 如果启用GPU，导入GPU支持模块并配置
         if args.use_gpu:
             try:
-                # 尝试导入GPU技术指标模块和GPU加速器
-                from src.features.gpu_accelerator import get_accelerator
-                from src.features.gpu_technical_indicators import GpuCompatibleTechnicalIndicators
+                # 尝试使用 PyTorch 进行 GPU 加速
+                logger.info("尝试使用PyTorch进行GPU加速...")
                 
-                accelerator = get_accelerator()
-                if accelerator.is_available():
-                    logger.info("GPU加速已启用 - RAPIDS库已加载")
-                    # 使用GPU兼容的技术指标类替换原有实现
-                    # FeatureEngineer._orig_tech_indicators = FeatureEngineer.tech_indicators
-                    # FeatureEngineer.tech_indicators = GpuCompatibleTechnicalIndicators()
-                    
-                    # 保存原始的TechnicalIndicators类
-                    import src.features.technical_indicators
-                    original_technical_indicators = src.features.technical_indicators.TechnicalIndicators
-                    # 替换为GPU兼容版本
-                    src.features.technical_indicators.TechnicalIndicators = GpuCompatibleTechnicalIndicators
-                    logger.info("已替换技术指标计算为GPU加速版本")
+                import torch
+                if torch.cuda.is_available():
+                    # 尝试导入PyTorch兼容的技术指标类
+                    try:
+                        from src.features.pytorch_technical_indicators import PyTorchCompatibleTechnicalIndicators
+                        
+                        # 保存原始的TechnicalIndicators类
+                        import src.features.technical_indicators
+                        original_technical_indicators = src.features.technical_indicators.TechnicalIndicators
+                        # 替换为PyTorch兼容版本
+                        src.features.technical_indicators.TechnicalIndicators = PyTorchCompatibleTechnicalIndicators
+                        logger.info("GPU加速已启用 - 使用PyTorch (CUDA)")
+                        logger.info(f"PyTorch版本: {torch.__version__}, CUDA可用设备: {torch.cuda.device_count()}")
+                        logger.info(f"当前CUDA设备: {torch.cuda.get_device_name(0)}")
+                    except ImportError:
+                        logger.warning("找不到PyTorch兼容的技术指标类。请确保src/features/pytorch_technical_indicators.py文件存在")
+                        logger.warning("将使用CPU进行计算")
                 else:
-                    logger.warning("无法启用GPU加速 - 未检测到RAPIDS库或GPU设备")
-            except ImportError as e:
-                logger.warning(f"无法导入GPU加速库: {e}")
-                logger.warning("将使用CPU进行计算，如需GPU加速，请安装RAPIDS库: 'pip install cudf-cu11 cuml-cu11 cupy-cuda11x'")
+                    logger.warning("PyTorch已安装但无法检测到CUDA。请确保CUDA正确安装并被PyTorch识别")
+                    logger.warning("将使用CPU进行计算")
+            
+            except Exception as e:
+                logger.warning(f"无法启用GPU加速: {str(e)}")
+                logger.warning("将使用CPU进行计算，如需GPU加速，请确保PyTorch能访问CUDA")
         
         # 创建特征工程器
         feature_engineer = FeatureEngineer(args.config)
