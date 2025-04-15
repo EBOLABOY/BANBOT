@@ -316,318 +316,528 @@ class PyTorchTechnicalIndicators:
 
         return result_tensors
 
-    def calculate_volatility_features_tensor(self, tensor_dict):
+    def calculate_volatility_features_tensor(self, tensor_dict, windows=None):
         """
-        计算波动性相关特征，纯张量操作
+        计算基于波动率的技术指标
 
         参数:
-            tensor_dict: 包含输入张量的字典 ('high', 'low', 'close')
+            tensor_dict: 包含'close'和可选的'high'和'low'价格的张量字典
+            windows: 窗口大小列表，如果为None则使用默认窗口大小
 
         返回:
-            包含波动性特征张量的字典
+            包含波动率特征的张量字典
         """
-        required_keys = ['high', 'low', 'close']
-        if not all(key in tensor_dict for key in required_keys):
-            logger.warning("波动性特征张量计算缺少必要的输入张量")
+        try:
+            if not isinstance(tensor_dict, dict):
+                raise ValueError("tensor_dict必须是字典类型")
+
+            if 'close' not in tensor_dict:
+                raise ValueError("tensor_dict必须包含'close'键")
+
+            close = tensor_dict['close']
+            
+            # 确保张量是2D的 [batch_size, features]
+            if close.dim() == 1:
+                close = close.unsqueeze(1)
+            
+            windows = windows or self.default_windows
+            result_tensors = {}
+
+            # 对每个窗口计算标准差
+            for window in windows:
+                if window <= 1:
+                    continue
+                    
+                # 计算滚动标准差
+                rolling_std = self._calculate_rolling_std(close, window)
+                if rolling_std is not None:
+                    col_name = f'std_{window}'
+                    result_tensors[col_name] = rolling_std
+                
+                # 计算滚动均值
+                rolling_mean = self._calculate_rolling_mean(close, window)
+                if rolling_mean is not None and rolling_std is not None:
+                    # 计算变异系数 (CV) = std/mean
+                    # 使用非零掩码避免除零错误
+                    non_zero_mask = rolling_mean != 0
+                    cv = torch.zeros_like(rolling_mean)
+                    cv[non_zero_mask] = rolling_std[non_zero_mask] / rolling_mean[non_zero_mask]
+                    
+                    col_name = f'cv_{window}'
+                    result_tensors[col_name] = cv
+                    
+                    # 计算标准化波动率 = std/price
+                    close_expanded = close.expand_as(rolling_std)
+                    non_zero_mask = close_expanded != 0
+                    norm_vol = torch.zeros_like(rolling_std)
+                    norm_vol[non_zero_mask] = rolling_std[non_zero_mask] / close_expanded[non_zero_mask]
+                    
+                    col_name = f'norm_vol_{window}'
+                    result_tensors[col_name] = norm_vol
+
+            # 计算ATR (如果高低价格可用)
+            if 'high' in tensor_dict and 'low' in tensor_dict:
+                high = tensor_dict['high']
+                low = tensor_dict['low']
+                
+                # 确保张量是2D的
+                if high.dim() == 1:
+                    high = high.unsqueeze(1)
+                if low.dim() == 1:
+                    low = low.unsqueeze(1)
+                
+                # 计算真实范围 (TR)
+                close_shift = torch.cat([torch.full((1, close.size(1)), float('nan'), device=close.device), close[:-1]], dim=0)
+                
+                # TR = max(high - low, |high - close_prev|, |low - close_prev|)
+                tr1 = high - low  # 当前高低价差
+                
+                # 创建掩码过滤无效数据
+                valid_mask = ~torch.isnan(close_shift)
+                tr2 = torch.abs(high - close_shift)
+                tr3 = torch.abs(low - close_shift)
+                
+                # 计算TR
+                tr = torch.maximum(tr1, torch.maximum(tr2, tr3))
+                
+                # 对每个窗口计算ATR
+                for window in windows:
+                    if window <= 1:
+                        continue
+                    
+                    atr = self._calculate_rolling_mean(tr, window)
+                    if atr is not None:
+                        col_name = f'atr_{window}'
+                        result_tensors[col_name] = atr
+                        
+                        # 计算标准化ATR
+                        non_zero_mask = close != 0
+                        norm_atr = torch.zeros_like(atr)
+                        close_expanded = close.expand_as(atr)
+                        mask = non_zero_mask & ~torch.isnan(atr)
+                        norm_atr[mask] = atr[mask] / close_expanded[mask]
+                        
+                        col_name = f'norm_atr_{window}'
+                        result_tensors[col_name] = norm_atr
+
+            return result_tensors
+            
+        except Exception as e:
+            logger.error(f"计算波动率特征时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {}
 
-        close = tensor_dict['close']
-        high = tensor_dict['high']
-        low = tensor_dict['low']
-
-        if not all(t.shape[0] == close.shape[0] for t in [high, low]):
-            logger.error("波动性特征输入张量长度不匹配")
-            return {}
-        if close.shape[0] == 0: return {} # Handle empty
-
-        result_tensors = {}
-
-        # Intraday volatility (High-Low Range / Close)
-        intraday_volatility = (high - low) / (close + 1e-10)
-        result_tensors['intraday_volatility'] = intraday_volatility
-
-        # Historical volatility (std dev of log returns)
-        log_returns = torch.log(close / (torch.roll(close, shifts=1, dims=0) + 1e-10)) # Add epsilon
-        log_returns[0] = 0 # Set first return to 0
-
-        for window in [5, 10, 20, 50]:
-            if window > 0 and window <= len(log_returns):
-                returns_windows = rolling_window(log_returns, window)
-                if returns_windows.shape[0] > 0:
-                     std_dev = torch.std(returns_windows, dim=1, unbiased=True)
-                     std_dev_full = torch.full_like(close, float('nan'))
-                     std_dev_full[window-1:] = std_dev
-                     annualization_factor = 252.0 # Adjust as needed
-                     annualized_vol = std_dev_full * torch.sqrt(torch.tensor(annualization_factor, device=self.device))
-                     result_tensors[f'volatility_{window}d'] = annualized_vol
-                else:
-                     logger.debug(f"无法为历史波动率生成滚动窗口 {window}")
-            else:
-                logger.debug(f"历史波动率窗口大小 {window} 无效或大于数据长度")
-
-        # True Range (TR)
-        high_low_tr = high - low
-        high_close_prev_tr = torch.abs(high - torch.roll(close, shifts=1, dims=0))
-        low_close_prev_tr = torch.abs(low - torch.roll(close, shifts=1, dims=0))
-        # Handle first element correctly
-        high_close_prev_tr[0] = high_low_tr[0] if len(high_low_tr)>0 else float('nan')
-        low_close_prev_tr[0] = high_low_tr[0] if len(high_low_tr)>0 else float('nan')
-
-        tr = torch.maximum(high_low_tr, torch.maximum(high_close_prev_tr, low_close_prev_tr))
-        result_tensors['tr'] = tr
-
-        # Average True Range (ATR)
-        for window in [5, 14, 20]:
-            if window > 0 and window <= len(tr):
-                # Use EWMA for standard ATR smoothing
-                # Handle potential NaNs in TR before EWMA
-                tr_nonan = torch.where(torch.isnan(tr), torch.zeros_like(tr), tr)
-                atr = ewma(tr_nonan, span=window)
-                result_tensors[f'atr_{window}'] = atr
-                # Relative ATR (ATR / Close)
-                atr_pct = atr / (close + 1e-10)
-                result_tensors[f'atr_pct_{window}'] = atr_pct
-            else:
-                logger.debug(f"ATR 计算窗口大小 {window} 无效或大于数据长度")
-
-        # Bollinger Band based volatility indicators
-        for window in [20, 50]:
-            if window > 0 and window <= len(close):
-                middle_band_vol = moving_average(close, window)
-                close_windows_vol = rolling_window(close, window)
-                if close_windows_vol.shape[0] > 0:
-                     std_dev_vol = torch.std(close_windows_vol, dim=1, unbiased=True)
-                     std_dev_full_vol = torch.full_like(close, float('nan'))
-                     std_dev_full_vol[window-1:] = std_dev_vol
-
-                     upper_band_vol = middle_band_vol + 2 * std_dev_full_vol
-                     lower_band_vol = middle_band_vol - 2 * std_dev_full_vol
-
-                     # Bollinger Band Width (%)
-                     bb_width = (upper_band_vol - lower_band_vol) / (middle_band_vol + 1e-10) * 100
-                     result_tensors[f'bb_width_pct_{window}'] = bb_width
-
-                     # %B Indicator (Price position relative to bands)
-                     bb_pos = (close - lower_band_vol) / ((upper_band_vol - lower_band_vol) + 1e-10)
-                     bb_pos = torch.clamp(bb_pos, 0, 1) # Scale 0 to 1
-                     result_tensors[f'bb_pos_{window}'] = bb_pos
-                else:
-                     logger.debug(f"无法为BBands波动率生成滚动窗口 {window}")
-            else:
-                 logger.debug(f"BBands 波动率窗口大小 {window} 无效或大于数据长度")
-
-        return result_tensors
-
-    def calculate_trend_features_tensor(self, tensor_dict):
+    def calculate_trend_features_tensor(self, tensor_dict, windows=None):
         """
-        计算趋势相关特征，纯张量操作
+        计算趋势相关特征
 
         参数:
-            tensor_dict: 包含输入张量的字典 ('open', 'high', 'low', 'close', Optional['volume'])
+            tensor_dict: 包含'close'价格的张量字典
+            windows: 窗口大小列表，如果为None则使用默认窗口大小
 
         返回:
-            包含趋势特征张量的字典
+            包含趋势特征的张量字典
         """
-        required_keys = ['open', 'high', 'low', 'close'] # Base requirements
-        if not all(key in tensor_dict for key in required_keys):
-            logger.warning("趋势特征张量计算缺少必要的输入张量 (OHLC)")
+        try:
+            if not isinstance(tensor_dict, dict):
+                raise ValueError("tensor_dict必须是字典类型")
+
+            if 'close' not in tensor_dict:
+                raise ValueError("tensor_dict必须包含'close'键")
+
+            close = tensor_dict['close']
+            
+            # 确保张量是2D的 [batch_size, features]
+            if close.dim() == 1:
+                close = close.unsqueeze(1)
+            
+            windows = windows or self.default_windows
+            result_tensors = {}
+
+            # 计算移动平均线
+            for window in windows:
+                if window <= 1:
+                    continue
+                
+                # 计算简单移动平均线 (SMA)
+                sma = self._calculate_rolling_mean(close, window)
+                if sma is not None:
+                    col_name = f'sma_{window}'
+                    result_tensors[col_name] = sma
+                    
+                    # 计算价格相对于移动平均线的百分比变化
+                    non_zero_mask = sma != 0
+                    close_to_ma = torch.zeros_like(sma)
+                    close_expanded = close.expand_as(sma)
+                    close_to_ma[non_zero_mask] = (close_expanded[non_zero_mask] / sma[non_zero_mask]) - 1.0
+                    
+                    col_name = f'close_to_ma_{window}'
+                    result_tensors[col_name] = close_to_ma
+                    
+                    # 计算移动平均线的斜率 (变化率)
+                    if sma.size(0) > 1:
+                        ma_slope = torch.zeros_like(sma)
+                        ma_slope[1:] = (sma[1:] - sma[:-1]) / sma[:-1].clamp(min=1e-8)
+                        ma_slope[0] = 0  # 第一个值无法计算斜率
+                        
+                        col_name = f'ma_slope_{window}'
+                        result_tensors[col_name] = ma_slope
+            
+            # 计算价格动量
+            for window in windows:
+                if window <= 1 or close.size(0) <= window:
+                    continue
+                
+                # 计算过去n期的价格变化率
+                shifted_close = torch.cat([torch.full((window, close.size(1)), float('nan'), device=close.device), close[:-window]], dim=0)
+                non_zero_mask = shifted_close != 0
+                momentum = torch.zeros_like(close)
+                momentum[non_zero_mask] = (close[non_zero_mask] / shifted_close[non_zero_mask]) - 1.0
+                
+                col_name = f'momentum_{window}'
+                result_tensors[col_name] = momentum
+                
+                # 计算历史最高价和最低价
+                if window > 1:
+                    rolling_max = self._calculate_rolling_max(close, window)
+                    rolling_min = self._calculate_rolling_min(close, window)
+                    
+                    if rolling_max is not None and rolling_min is not None:
+                        # 计算价格位置百分比 (PPO) = (close - min) / (max - min)
+                        price_range = rolling_max - rolling_min
+                        non_zero_range = price_range > 0
+                        
+                        ppo = torch.zeros_like(close)
+                        close_expanded = close.expand_as(rolling_min)
+                        min_expanded = rolling_min.expand_as(rolling_min)
+                        
+                        ppo[non_zero_range] = (close_expanded[non_zero_range] - min_expanded[non_zero_range]) / price_range[non_zero_range]
+                        
+                        col_name = f'ppo_{window}'
+                        result_tensors[col_name] = ppo
+            
+            return result_tensors
+            
+        except Exception as e:
+            logger.error(f"计算趋势特征时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {}
 
-        close = tensor_dict['close']
-        high = tensor_dict['high']
-        low = tensor_dict['low']
-        # open_price = tensor_dict['open'] # Not used here currently
-        # volume = tensor_dict.get('volume') # Needed for ADX
-
-        if close.shape[0] == 0: return {} # Handle empty
-
-        result_tensors = {}
-
-        # Price relative to moving averages
-        for window in [10, 20, 50, 100, 200]:
-            if window > 0 and window <= len(close):
-                sma = moving_average(close, window)
-                price_rel_sma = (close / (sma + 1e-10)) - 1 # As percentage difference
-                result_tensors[f'price_rel_sma_{window}'] = price_rel_sma
-            else:
-                 logger.debug(f"价格相对SMA窗口大小 {window} 无效")
-
-        # Moving average slope/direction
-        ma_slope_period = 5
-        for window in [20, 50]:
-            if window > 0 and window + ma_slope_period <= len(close):
-                sma = moving_average(close, window)
-                sma_change = (sma - torch.roll(sma, shifts=ma_slope_period, dims=0)) / (torch.roll(sma, shifts=ma_slope_period, dims=0) + 1e-10)
-                sma_change[:window+ma_slope_period-1] = float('nan')
-                sma_direction = torch.sign(sma_change)
-                result_tensors[f'sma_{window}_slope_{ma_slope_period}'] = sma_change
-                result_tensors[f'sma_{window}_direction'] = sma_direction
-            else:
-                 logger.debug(f"SMA 斜率窗口大小 {window} 或周期 {ma_slope_period} 无效")
-
-        # Calculate EMA crossover
-        fast_period = 20
-        slow_period = 50
-        if slow_period > fast_period and slow_period <= len(close):
-            fast_ema = ewma(close, span=fast_period)
-            slow_ema = ewma(close, span=slow_period)
-            ema_diff = fast_ema - slow_ema
-            ema_cross = torch.sign(ema_diff)
-            ema_cross_change = torch.diff(ema_cross, dim=0, prepend=ema_cross[0:1])
-            result_tensors['ema_diff'] = ema_diff
-            result_tensors['ema_cross_signal'] = ema_cross
-            result_tensors['ema_crossover'] = ema_cross_change
-        else:
-             logger.debug("EMA 交叉周期无效")
-
-        # Calculate Trend Strength Index (TSI)
-        tsi_tensor = self.tsi(close, r=25, s=13)
-        result_tensors['tsi'] = tsi_tensor
-
-        # Calculate ADX trend strength and direction
-        adx_window = 14
-        if high is not None and low is not None and adx_window <= len(close)-1:
-             high_diff_adx = torch.diff(high, dim=0, prepend=high[0:1])
-             low_diff_adx = torch.diff(low, dim=0, prepend=low[0:1])
-             plus_dm_adx = torch.where((high_diff_adx > 0) & (high_diff_adx > torch.abs(low_diff_adx)), high_diff_adx, torch.zeros_like(high_diff_adx))
-             minus_dm_adx = torch.where((low_diff_adx < 0) & (torch.abs(low_diff_adx) > high_diff_adx), torch.abs(low_diff_adx), torch.zeros_like(low_diff_adx))
-             high_low_adx = high - low
-             high_close_prev_adx = torch.abs(high - torch.roll(close, shifts=1, dims=0))
-             low_close_prev_adx = torch.abs(low - torch.roll(close, shifts=1, dims=0))
-             high_close_prev_adx[0]=0
-             low_close_prev_adx[0]=0
-             tr_adx = torch.maximum(high_low_adx, torch.maximum(high_close_prev_adx, low_close_prev_adx))
-             tr_ema_adx = ewma(tr_adx, span=adx_window)
-             plus_dm_ema_adx = ewma(plus_dm_adx, span=adx_window)
-             minus_dm_ema_adx = ewma(minus_dm_adx, span=adx_window)
-             plus_di = 100 * plus_dm_ema_adx / (tr_ema_adx + 1e-10)
-             minus_di = 100 * minus_dm_ema_adx / (tr_ema_adx + 1e-10)
-             dx = 100 * torch.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-             dx = torch.where(torch.isnan(dx) | torch.isinf(dx), torch.zeros_like(dx), dx)
-             adx = ewma(dx, span=adx_window)
-
-             result_tensors[f'adx_{adx_window}'] = adx
-             result_tensors['plus_di'] = plus_di
-             result_tensors['minus_di'] = minus_di
-             trend_strength = torch.where(adx > 25, torch.ones_like(adx), torch.zeros_like(adx))
-             trend_direction = torch.sign(plus_di - minus_di)
-             strong_trend = trend_strength * trend_direction
-             result_tensors['trend_strength'] = trend_strength
-             result_tensors['trend_direction'] = trend_direction
-             result_tensors['strong_trend'] = strong_trend
-        else:
-             logger.warning("无法计算ADX趋势强度/方向，缺少数据或列")
-
-        return result_tensors
-
-    def calculate_momentum_features_tensor(self, tensor_dict):
+    def calculate_momentum_features_tensor(self, tensor_dict, windows=None):
         """
         计算动量相关特征，纯张量操作
         
         参数:
-            tensor_dict: 包含输入张量的字典 ('open', 'high', 'low', 'close', Optional['volume'])
+            tensor_dict: 包含输入张量的字典 ('close')
+            windows: 可选，计算特征的窗口大小列表，默认为[5, 10, 20, 30]
             
         返回:
             包含动量特征张量的字典
         """
-        required_keys = ['open', 'high', 'low', 'close'] # Volume optional
-        if not all(key in tensor_dict for key in required_keys):
-            logger.warning("动量特征张量计算缺少必要的输入张量")
-            return {}
-
-        # Get tensors
-        close = tensor_dict['close']
-        high = tensor_dict['high']
-        low = tensor_dict['low']
-        # open_price = tensor_dict['open']
-        # volume = tensor_dict.get('volume')
-
-        # Store computed tensors
         result_tensors = {}
-
-        # Calculate Rate of Change (ROC)
-        for period in [1, 3, 5, 10, 20, 60]:
-            if period > 0 and period <= len(close):
-                prev_close = torch.roll(close, shifts=period, dims=0)
-                prev_close[:period] = float('nan')
-                roc = (close - prev_close) / (prev_close + 1e-10) * 100
-                result_tensors[f'roc_{period}'] = roc
-            else:
-                 logger.warning(f"ROC 周期 {period} 无效")
-
-        # Calculate RSI momentum indicator
-        price_diff_rsi = torch.diff(close, dim=0, prepend=close[0:1])
-        for window in [6, 14]:
-            if window > 0 and window <= len(price_diff_rsi):
-                up_rsi = torch.maximum(price_diff_rsi, torch.zeros_like(price_diff_rsi))
-                down_rsi = torch.abs(torch.minimum(price_diff_rsi, torch.zeros_like(price_diff_rsi)))
-                avg_up_rsi = moving_average(up_rsi, window)
-                avg_down_rsi = moving_average(down_rsi, window)
-                rs_rsi = avg_up_rsi / (avg_down_rsi + 1e-10)
-                rsi = 100 - (100 / (1 + rs_rsi))
-                rsi = torch.clamp(rsi, 0, 100)
-                result_tensors[f'rsi_{window}'] = rsi
-            else:
-                logger.warning(f"RSI 动量窗口 {window} 无效")
-
-        # Calculate MACD momentum indicators
-        fast_p = 12; slow_p = 26; signal_p = 9
-        if slow_p <= len(close):
-             fast_ema_macd = ewma(close, span=fast_p)
-             slow_ema_macd = ewma(close, span=slow_p)
-             macd_line = fast_ema_macd - slow_ema_macd
-             if signal_p <= len(macd_line):
-                  signal_line = ewma(macd_line, span=signal_p)
-                  histogram = macd_line - signal_line
-                  histogram_change = torch.diff(histogram, dim=0, prepend=histogram[0:1])
-                  histogram_direction = torch.sign(histogram)
-                  histogram_trend = torch.sign(histogram_change)
-                  result_tensors['macd_line'] = macd_line
-                  result_tensors['macd_signal'] = signal_line
-                  result_tensors['macd_hist'] = histogram
-                  result_tensors['macd_hist_change'] = histogram_change
-                  result_tensors['macd_hist_direction'] = histogram_direction
-                  result_tensors['macd_hist_trend'] = histogram_trend
-             else:
-                  logger.warning("无法计算 MACD 动量 - 信号周期")
-        else:
-             logger.warning("无法计算 MACD 动量 - 慢周期")
-
-        # Calculate Stochastic Oscillator momentum indicators
-        window_k_stoch = 14
-        window_d_stoch = 3
-        if high is not None and low is not None and window_k_stoch <= len(close):
-            windows_high_stoch = rolling_window(high, window_k_stoch)
-            windows_low_stoch = rolling_window(low, window_k_stoch)
-            highest_high_stoch = torch.max(windows_high_stoch, dim=1)[0]
-            lowest_low_stoch = torch.min(windows_low_stoch, dim=1)[0]
-            highest_high_full_stoch = torch.full_like(close, float('nan'))
-            lowest_low_full_stoch = torch.full_like(close, float('nan'))
-            if len(highest_high_stoch) > 0 : highest_high_full_stoch[window_k_stoch-1:] = highest_high_stoch
-            if len(lowest_low_stoch) > 0 : lowest_low_full_stoch[window_k_stoch-1:] = lowest_low_stoch
-            for i in range(window_k_stoch-1):
-                if i+1 <= len(high):
-                     highest_high_full_stoch[i] = torch.max(high[:i+1])
-                     lowest_low_full_stoch[i] = torch.min(low[:i+1])
-            stoch_k = 100 * (close - lowest_low_full_stoch) / (highest_high_full_stoch - lowest_low_full_stoch + 1e-10)
-            stoch_k = torch.where(torch.isnan(stoch_k) | torch.isinf(stoch_k), torch.zeros_like(stoch_k), stoch_k)
-            stoch_k = torch.clamp(stoch_k, 0, 100)
-
-            if window_d_stoch <= len(stoch_k):
-                 stoch_d = moving_average(stoch_k, window_d_stoch)
-                 stoch_d = torch.clamp(stoch_d, 0, 100)
-                 stoch_cross = stoch_k - stoch_d
-                 stoch_cross_signal = torch.sign(stoch_cross)
-                 result_tensors['stoch_k'] = stoch_k
-                 result_tensors['stoch_d'] = stoch_d
-                 result_tensors['stoch_cross_diff'] = stoch_cross
-                 result_tensors['stoch_cross_signal'] = stoch_cross_signal
-            else:
-                 logger.warning("无法计算 Stochastic %D")
-        else:
-            logger.warning("无法计算 Stochastic %K")
-
+        
+        # 设置默认窗口
+        if windows is None:
+            windows = [5, 10, 20, 30]
+            
+        # 检查所需字段
+        if 'close' not in tensor_dict:
+            logger.warning("计算动量特征缺少 'close' 键")
+            return result_tensors
+            
+        try:
+            # 获取收盘价并确保张量格式正确
+            close = tensor_dict['close']
+            
+            # 确保张量是2D的 [batch_size, 1]，如果是1D则扩展维度
+            if close.dim() == 1:
+                close = close.unsqueeze(1)
+            
+            # 计算RSI
+            try:
+                for window in windows:
+                    # 计算价格变化
+                    price_diff = close - close.roll(1, 0)
+                    # 将第一个差值设为0
+                    price_diff[0] = 0
+                    
+                    # 分离正负变化
+                    gains = torch.where(price_diff > 0, price_diff, torch.zeros_like(price_diff))
+                    losses = torch.abs(torch.where(price_diff < 0, price_diff, torch.zeros_like(price_diff)))
+                    
+                    # 计算平均增益和平均损失
+                    avg_gain = self._calculate_rolling_mean(gains, window)
+                    avg_loss = self._calculate_rolling_mean(losses, window)
+                    
+                    # 计算相对强度和RSI
+                    if avg_gain is not None and avg_loss is not None:
+                        rs = torch.where(
+                            avg_loss > 1e-10,
+                            avg_gain / avg_loss,
+                            torch.ones_like(avg_gain) * 100
+                        )
+                        rsi = 100 - (100 / (1 + rs))
+                        result_tensors[f'rsi_{window}'] = rsi
+            except Exception as e:
+                logger.error(f"计算RSI时发生错误: {str(e)}")
+            
+            # MACD指标
+            try:
+                # MACD参数
+                fast = 12
+                slow = 26
+                signal = 9
+                
+                # 计算指数移动平均
+                ema_fast = self._calculate_ewma(close, span=fast)
+                ema_slow = self._calculate_ewma(close, span=slow)
+                
+                if ema_fast is not None and ema_slow is not None:
+                    # 计算MACD线
+                    macd_line = ema_fast - ema_slow
+                    # 计算信号线
+                    signal_line = self._calculate_ewma(macd_line, span=signal)
+                    
+                    if signal_line is not None:
+                        # 计算直方图
+                        histogram = macd_line - signal_line
+                        
+                        result_tensors['macd_line'] = macd_line
+                        result_tensors['macd_signal'] = signal_line
+                        result_tensors['macd_histogram'] = histogram
+            except Exception as e:
+                logger.error(f"计算MACD时发生错误: {str(e)}")
+                
+            # 动量震荡器
+            try:
+                for window in windows:
+                    momentum = close - close.roll(window, 0)
+                    normalized_momentum = momentum / close.roll(window, 0)
+                    result_tensors[f'momentum_oscillator_{window}'] = normalized_momentum
+            except Exception as e:
+                logger.error(f"计算动量震荡器时发生错误: {str(e)}")
+                
+            # Williams %R
+            try:
+                for window in windows:
+                    high = self._calculate_rolling_max(close, window)
+                    low = self._calculate_rolling_min(close, window)
+                    
+                    if high is not None and low is not None:
+                        denom = high - low
+                        williams_r = torch.where(
+                            denom > 1e-10,
+                            -100 * ((high - close) / denom),
+                            torch.zeros_like(denom)
+                        )
+                        result_tensors[f'williams_r_{window}'] = williams_r
+            except Exception as e:
+                logger.error(f"计算Williams %R时发生错误: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"计算动量特征时发生错误: {str(e)}")
+            
         return result_tensors
+
+    def _calculate_rolling_std(self, tensor, window):
+        """
+        计算张量的滚动标准差
+        
+        参数:
+            tensor: 输入张量 [batch_size, features]
+            window: 窗口大小
+            
+        返回:
+            滚动标准差张量，与输入形状相同
+        """
+        try:
+            # 确保输入是2D的
+            if tensor.dim() == 1:
+                tensor = tensor.unsqueeze(1)
+                
+            batch_size, features = tensor.shape
+            
+            # 使用unfold操作获取滚动窗口
+            # 注意：这会产生 [batch_size-window+1, window, features] 的张量
+            if batch_size >= window:
+                windows = tensor.unfold(0, window, 1)
+                
+                # 计算每个窗口的标准差
+                # 结果形状为 [batch_size-window+1, features]
+                stds = torch.std(windows, dim=1)
+                
+                # 为前window-1个元素填充NaN值
+                padding = torch.full((window-1, features), float('nan'), 
+                                    device=tensor.device, dtype=tensor.dtype)
+                result = torch.cat([padding, stds], dim=0)
+                
+                return result
+            else:
+                logger.warning(f"滚动标准差计算窗口大小 {window} 大于批次大小 {batch_size}")
+                return None
+        except Exception as e:
+            logger.error(f"计算滚动标准差时出错: {str(e)}")
+            return None
+            
+    def _calculate_rolling_max(self, tensor, window):
+        """
+        计算张量的滚动最大值
+        
+        参数:
+            tensor: 输入张量 [batch_size, features]
+            window: 窗口大小
+            
+        返回:
+            滚动最大值张量，与输入形状相同
+        """
+        try:
+            # 确保输入是2D的
+            if tensor.dim() == 1:
+                tensor = tensor.unsqueeze(1)
+                
+            batch_size, features = tensor.shape
+            
+            if batch_size >= window:
+                # 使用unfold操作获取滚动窗口
+                windows = tensor.unfold(0, window, 1)
+                
+                # 计算每个窗口的最大值
+                max_values = torch.max(windows, dim=1)[0]
+                
+                # 为前window-1个元素填充NaN值
+                padding = torch.full((window-1, features), float('nan'), 
+                                    device=tensor.device, dtype=tensor.dtype)
+                result = torch.cat([padding, max_values], dim=0)
+                
+                return result
+            else:
+                logger.warning(f"滚动最大值计算窗口大小 {window} 大于批次大小 {batch_size}")
+                return None
+        except Exception as e:
+            logger.error(f"计算滚动最大值时出错: {str(e)}")
+            return None
+            
+    def _calculate_rolling_min(self, tensor, window):
+        """
+        计算张量的滚动最小值
+        
+        参数:
+            tensor: 输入张量 [batch_size, features]
+            window: 窗口大小
+            
+        返回:
+            滚动最小值张量，与输入形状相同
+        """
+        try:
+            # 确保输入是2D的
+            if tensor.dim() == 1:
+                tensor = tensor.unsqueeze(1)
+                
+            batch_size, features = tensor.shape
+            
+            if batch_size >= window:
+                # 使用unfold操作获取滚动窗口
+                windows = tensor.unfold(0, window, 1)
+                
+                # 计算每个窗口的最小值
+                min_values = torch.min(windows, dim=1)[0]
+                
+                # 为前window-1个元素填充NaN值
+                padding = torch.full((window-1, features), float('nan'), 
+                                    device=tensor.device, dtype=tensor.dtype)
+                result = torch.cat([padding, min_values], dim=0)
+                
+                return result
+            else:
+                logger.warning(f"滚动最小值计算窗口大小 {window} 大于批次大小 {batch_size}")
+                return None
+        except Exception as e:
+            logger.error(f"计算滚动最小值时出错: {str(e)}")
+            return None
+
+    def _calculate_rolling_mean(self, tensor, window):
+        """
+        计算张量的滚动平均值
+        
+        参数:
+            tensor: 输入张量，可以是1D [N] 或 2D [N, C]
+            window: 窗口大小
+            
+        返回:
+            滚动平均值张量
+        """
+        try:
+            # 检查张量维度
+            original_shape = tensor.shape
+            original_dim = tensor.dim()
+            
+            # 确保张量是1D的
+            if original_dim > 1:
+                tensor = tensor.squeeze()
+                logger.debug(f"将张量从 {original_shape} 转换为 {tensor.shape}")
+            
+            # 获取滚动窗口
+            windows = rolling_window(tensor, window)
+            
+            if windows.shape[0] > 0:
+                # 计算平均值
+                mean_values = torch.mean(windows, dim=1)
+                
+                # 创建结果张量
+                result = torch.full_like(tensor, float('nan'))
+                result[window-1:] = mean_values
+                
+                # 恢复原始形状
+                if original_dim > 1:
+                    result = result.view(original_shape)
+                
+                return result
+            else:
+                logger.warning(f"无法为 {window} 窗口生成滚动平均值")
+                return torch.full_like(tensor, float('nan'))
+                
+        except Exception as e:
+            logger.error(f"计算滚动平均值时出错: {str(e)}")
+            return torch.full_like(tensor, float('nan'))
+
+    def _calculate_ewma(self, tensor, span):
+        """
+        计算张量的指数移动平均值
+        
+        参数:
+            tensor: 输入张量，可以是1D [N] 或 2D [N, C]
+            span: 时间窗口大小
+            
+        返回:
+            指数移动平均值张量
+        """
+        try:
+            # 检查张量维度
+            original_shape = tensor.shape
+            original_dim = tensor.dim()
+            
+            # 确保张量是1D的
+            if original_dim > 1:
+                tensor = tensor.squeeze()
+                logger.debug(f"将张量从 {original_shape} 转换为 {tensor.shape}")
+            
+            # 计算指数移动平均值
+            ema = ewma(tensor, span=span, adjust=False)
+            
+            # 创建结果张量
+            result = torch.full_like(tensor, float('nan'))
+            result[span-1:] = ema
+            
+            # 恢复原始形状
+            if original_dim > 1:
+                result = result.view(original_shape)
+            
+            return result
+        except Exception as e:
+            logger.error(f"计算指数移动平均值时出错: {str(e)}")
+            return torch.full_like(tensor, float('nan'))
 
     # --- Original DataFrame-based Methods (kept for compatibility or potential CPU fallback) ---
 
@@ -1031,64 +1241,297 @@ class PyTorchCompatibleTechnicalIndicators(PyTorchTechnicalIndicators):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
         
-        # 如果传入了具体的技术指标名称（如'MACD', 'RSI'等），需要转换
-        # 因为我们的新实现使用了分类（'price', 'volume', 'volatility', 'trend', 'momentum'）
-        if indicators is not None and isinstance(indicators, list) and len(indicators) > 0 and isinstance(indicators[0], str):
-            # 检查第一个元素，如果不是我们的分类之一，则进行映射
-            first_elem = indicators[0].lower()
-            if first_elem not in ['price', 'volume', 'volatility', 'trend', 'momentum']:
-                # 创建映射，转换传统指标名称为新的分类
-                indicators_mapping = {
-                    'MACD': 'momentum',
-                    'RSI': 'momentum',
-                    'STOCH': 'momentum',
-                    'BBANDS': 'volatility',
-                    'ATR': 'volatility',
-                    'ADX': 'trend',
-                    'CCI': 'trend'
-                }
-                
-                # 将指标名称转换为分类
-                needed_groups = set()
-                for ind in indicators:
-                    if ind.upper() in indicators_mapping:
-                        needed_groups.add(indicators_mapping[ind.upper()])
-                
-                # 如果有分类，使用这些分类
-                if needed_groups:
-                    indicators = list(needed_groups)
-                else:
-                    # 如果没有匹配的分类，使用所有分类
-                    indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的技术指标")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 将找到的列映射到标准名称
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 如果传入了具体的技术指标名称（如'MACD', 'RSI'等），需要转换
+            # 因为我们的新实现使用了分类（'price', 'volume', 'volatility', 'trend', 'momentum'）
+            if indicators is not None and isinstance(indicators, list) and len(indicators) > 0 and isinstance(indicators[0], str):
+                # 检查第一个元素，如果不是我们的分类之一，则进行映射
+                first_elem = indicators[0].lower()
+                if first_elem not in ['price', 'volume', 'volatility', 'trend', 'momentum']:
+                    # 创建映射，转换传统指标名称为新的分类
+                    indicators_mapping = {
+                        'MACD': 'momentum',
+                        'RSI': 'momentum',
+                        'STOCH': 'momentum',
+                        'BBANDS': 'volatility',
+                        'ATR': 'volatility',
+                        'ADX': 'trend',
+                        'CCI': 'trend'
+                    }
                     
-        return instance.calculate_indicators(df, indicators, window_sizes)
+                    # 将指标名称转换为分类
+                    needed_groups = set()
+                    for ind in indicators:
+                        if ind.upper() in indicators_mapping:
+                            needed_groups.add(indicators_mapping[ind.upper()])
+                    
+                    # 如果有分类，使用这些分类
+                    if needed_groups:
+                        indicators = list(needed_groups)
+                    else:
+                        # 如果没有匹配的分类，使用所有分类
+                        indicators = ['price', 'volume', 'volatility', 'trend', 'momentum']
+            
+            return instance.calculate_indicators(df, indicators, window_sizes)
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算技术指标时出错: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return result_df
     
     @staticmethod
     def calculate_price_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        return instance.calculate_price_features(df)
+        
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的价格特征")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 映射张量字典中的键名
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 使用实例方法计算价格特征
+            result_tensors = instance.calculate_price_features_tensor(mapped_tensor_dict)
+            
+            # 将计算结果添加回DataFrame
+            if result_tensors:
+                result_df = instance._add_results_to_df(result_df, result_tensors)
+                
+            logger.info("已计算价格特征 (PyTorch兼容版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算价格特征时出错: {str(e)}")
+            return result_df
     
     @staticmethod
     def calculate_volume_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        return instance.calculate_volume_features(df)
+        
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的交易量特征")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 映射张量字典中的键名
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 使用实例方法计算交易量特征
+            result_tensors = instance.calculate_volume_features_tensor(mapped_tensor_dict)
+            
+            # 将计算结果添加回DataFrame
+            if result_tensors:
+                result_df = instance._add_results_to_df(result_df, result_tensors)
+                
+            logger.info("已计算交易量特征 (PyTorch兼容版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算交易量特征时出错: {str(e)}")
+            return result_df
     
     @staticmethod
     def calculate_volatility_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        return instance.calculate_volatility_features(df)
+        
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的波动性特征")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 映射张量字典中的键名
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 使用实例方法计算波动性特征
+            result_tensors = instance.calculate_volatility_features_tensor(mapped_tensor_dict)
+            
+            # 将计算结果添加回DataFrame
+            if result_tensors:
+                result_df = instance._add_results_to_df(result_df, result_tensors)
+                
+            logger.info("已计算波动性特征 (PyTorch兼容版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算波动性特征时出错: {str(e)}")
+            return result_df
     
     @staticmethod
     def calculate_trend_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        return instance.calculate_trend_features(df)
+        
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的趋势特征")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 映射张量字典中的键名
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 使用实例方法计算趋势特征
+            result_tensors = instance.calculate_trend_features_tensor(mapped_tensor_dict)
+            
+            # 将计算结果添加回DataFrame
+            if result_tensors:
+                result_df = instance._add_results_to_df(result_df, result_tensors)
+                
+            logger.info("已计算趋势特征 (PyTorch兼容版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算趋势特征时出错: {str(e)}")
+            return result_df
     
     @staticmethod
     def calculate_momentum_features(df):
         """静态方法接口兼容，使用 PyTorch 版本的计算"""
         instance = PyTorchTechnicalIndicators()
-        return instance.calculate_momentum_features(df) 
+        
+        if df is None or df.empty:
+            logger.warning("无法计算空数据的动量特征")
+            return df
+            
+        # 创建副本，避免修改原始数据
+        result_df = df.copy()
+        
+        try:
+            # 将DataFrame转换为张量字典
+            tensor_dict = df_to_tensor(df)
+            
+            # 映射张量字典中的键名
+            mapped_tensor_dict = {}
+            # 尝试匹配常见的列命名
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'open' in col_lower:
+                    mapped_tensor_dict['open'] = tensor_dict[col]
+                elif 'high' in col_lower:
+                    mapped_tensor_dict['high'] = tensor_dict[col]
+                elif 'low' in col_lower:
+                    mapped_tensor_dict['low'] = tensor_dict[col]
+                elif 'close' in col_lower:
+                    mapped_tensor_dict['close'] = tensor_dict[col]
+                elif 'volume' in col_lower:
+                    mapped_tensor_dict['volume'] = tensor_dict[col]
+            
+            # 使用实例方法计算动量特征
+            result_tensors = instance.calculate_momentum_features_tensor(mapped_tensor_dict)
+            
+            # 将计算结果添加回DataFrame
+            if result_tensors:
+                result_df = instance._add_results_to_df(result_df, result_tensors)
+                
+            logger.info("已计算动量特征 (PyTorch兼容版)")
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"PyTorch兼容层计算动量特征时出错: {str(e)}")
+            return result_df 

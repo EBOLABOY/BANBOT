@@ -136,61 +136,101 @@ def rolling_window(tensor, window_size):
     创建滚动窗口视图，用于计算移动平均等
     
     参数:
-        tensor: 形状为 [N, C] 的张量，其中 N 是样本数，C 是特征数
+        tensor: 形状为 [N] 或 [N, C] 的张量，其中 N 是样本数，C 是特征数
         window_size: 窗口大小
         
     返回:
-        形状为 [N-window_size+1, window_size, C] 的张量
+        如果输入是 1D: 形状为 [N-window_size+1, window_size] 的张量
+        如果输入是 2D: 形状为 [N-window_size+1, window_size, C] 的张量
     """
+    # 确保输入张量是二维的
+    input_is_1d = False
     if tensor.dim() == 1:
-        tensor = tensor.unsqueeze(1)
+        input_is_1d = True
+        tensor = tensor.unsqueeze(1)  # 将 [N] 转为 [N, 1]
     
-    shape = tensor.shape
+    # 检查张量形状
+    logger.debug(f"rolling_window: 输入张量形状 {tensor.shape}, 窗口大小 {window_size}")
     
     # 使用 unfold 创建窗口视图
-    return tensor.unfold(0, window_size, 1)
+    windows = tensor.unfold(0, window_size, 1)
+    
+    # 返回适当形状的张量
+    if input_is_1d and windows.dim() > 2:
+        # 如果原始输入是1D，最终结果应该是二维的 [N-window_size+1, window_size]
+        windows = windows.squeeze(-1)
+    
+    logger.debug(f"rolling_window: 返回窗口形状 {windows.shape}")
+    return windows
 
 def moving_average(tensor, window_size, weights=None):
     """
     计算移动平均
     
     参数:
-        tensor: 输入张量
+        tensor: 输入张量，形状为 [N] 或 [N, C]
         window_size: 窗口大小
         weights: 权重张量，形状为 [window_size]，如果为None则计算简单移动平均
         
     返回:
-        移动平均结果张量
+        移动平均结果张量，保持与输入相同的维度
     """
     # 确保张量在GPU上
     if isinstance(tensor, np.ndarray):
         tensor = torch.tensor(tensor, dtype=torch.float32, device=DEVICE)
     
-    if tensor.dim() == 1:
-        tensor = tensor.unsqueeze(1)
+    # 记录原始维度
+    original_dim = tensor.dim()
+    
+    # 确保张量是二维的用于处理
+    if original_dim == 1:
+        tensor = tensor.unsqueeze(1)  # [N] -> [N, 1]
+    
+    # 获取张量形状
+    n_samples, n_features = tensor.shape
+    
+    # 记录处理日志
+    logger.debug(f"moving_average: 输入张量形状 {tensor.shape}, 窗口 {window_size}")
     
     # 创建滚动窗口视图
-    windows = rolling_window(tensor, window_size)
-    
-    # 处理NaN值
-    nan_mask = torch.isnan(windows)
-    windows = torch.where(nan_mask, torch.zeros_like(windows), windows)
-    
-    # 计算移动平均
-    if weights is not None:
-        # 确保权重在GPU上
-        weights = weights.to(DEVICE)
-        # 加权移动平均
-        ma = torch.sum(windows * weights.view(1, -1, 1), dim=1) / torch.sum(weights)
-    else:
-        # 简单移动平均
-        ma = torch.nanmean(windows, dim=1)
-    
-    # 填充缺失的值（窗口前的部分）
-    result = torch.full((tensor.shape[0], tensor.shape[1]), float('nan'), device=DEVICE)
-    result[window_size-1:] = ma
-    
-    return result
+    try:
+        windows = rolling_window(tensor, window_size)  # [N-window_size+1, window_size, n_features]
+        
+        # 处理NaN值
+        nan_mask = torch.isnan(windows)
+        windows = torch.where(nan_mask, torch.zeros_like(windows), windows)
+        
+        # 计算移动平均
+        if weights is not None:
+            # 确保权重在GPU上
+            weights = weights.to(DEVICE)
+            # 加权移动平均
+            if windows.dim() == 3:  # [N-window_size+1, window_size, n_features]
+                ma = torch.sum(windows * weights.view(1, -1, 1), dim=1) / torch.sum(weights)
+            else:  # [N-window_size+1, window_size]
+                ma = torch.sum(windows * weights.view(1, -1), dim=1) / torch.sum(weights)
+        else:
+            # 简单移动平均
+            ma = torch.nanmean(windows, dim=1)
+        
+        # 创建结果张量
+        result = torch.full((n_samples, n_features), float('nan'), device=DEVICE)
+        result[window_size-1:] = ma
+        
+        # 如果原始输入是一维的，返回一维结果
+        if original_dim == 1:
+            result = result.squeeze(1)
+            
+        logger.debug(f"moving_average: 返回张量形状 {result.shape}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"moving_average计算错误: {str(e)}")
+        # 返回原始形状的NaN张量
+        if original_dim == 1:
+            return torch.full((n_samples,), float('nan'), device=DEVICE)
+        else:
+            return torch.full((n_samples, n_features), float('nan'), device=DEVICE)
 
 def ewma(tensor, span, adjust=False):
     """
