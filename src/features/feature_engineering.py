@@ -266,24 +266,32 @@ class FeatureEngineer:
                     current_cross = result_df['sma_5'] > result_df['sma_20']
                     # 上一周期 sma_5 <= sma_20
                     previous_state = result_df['sma_5'].shift(1) <= result_df['sma_20'].shift(1)
-                    result_df['signal_sma_cross_5_20'] = (current_cross & previous_state).astype(int)
+                    # 计算原始信号，可能包含NaN
+                    raw_signal = (current_cross & previous_state)
+                    # 填充NaN为False，然后转为整数 (0 或 1)
+                    result_df['signal_sma_cross_5_20'] = raw_signal.fillna(False).astype(int)
                 else:
                     logger.warning("缺少 sma_5 或 sma_20 列，无法计算SMA交叉信号")
 
                 # 2. MACD Histogram 正负信号
                 if 'macd_diff' in result_df.columns:
-                    result_df['signal_macd_hist_sign'] = np.sign(result_df['macd_diff']).astype(int)
+                    # 计算原始信号，可能包含NaN
+                    raw_sign = np.sign(result_df['macd_diff'])
+                    # 填充NaN为0，然后转为整数 (-1, 0, 1)
+                    result_df['signal_macd_hist_sign'] = raw_sign.fillna(0).astype(int)
                 else:
                     logger.warning("缺少 macd_diff 列，无法计算MACD Histogram信号")
 
-                # 3. RSI 超买/超卖信号 (使用 rsi_14)
+                # 3. RSI 超买/超卖信号 (使用 rsi_14) - 保持原逻辑，它应能处理NaN
                 rsi_col = 'rsi_14' # 假设使用14周期RSI
                 if rsi_col in result_df.columns:
                     overbought_threshold = 70
                     oversold_threshold = 30
                     result_df['signal_rsi_ob_os'] = 0 # 默认为0 (中性)
-                    result_df.loc[result_df[rsi_col] > overbought_threshold, 'signal_rsi_ob_os'] = 1 # 超买
-                    result_df.loc[result_df[rsi_col] < oversold_threshold, 'signal_rsi_ob_os'] = -1 # 超卖
+                    # 确保只对非NaN的RSI值应用条件
+                    valid_rsi = result_df[rsi_col].notna()
+                    result_df.loc[valid_rsi & (result_df[rsi_col] > overbought_threshold), 'signal_rsi_ob_os'] = 1 # 超买
+                    result_df.loc[valid_rsi & (result_df[rsi_col] < oversold_threshold), 'signal_rsi_ob_os'] = -1 # 超卖
                 else:
                     logger.warning(f"缺少 {rsi_col} 列，无法计算RSI超买/超卖信号")
                 logger.info("已计算组合/衍生信号特征")
@@ -299,6 +307,10 @@ class FeatureEngineer:
             
             calculated_cols = len(result_df.columns) - len(df.columns)
             logger.info(f"已计算 {calculated_cols} 个特征")
+            
+            # 添加 .copy() 来解决性能警告
+            result_df = result_df.copy()
+            
             return result_df
             
         except Exception as e:
@@ -702,168 +714,208 @@ class FeatureEngineer:
             batch_size: 批处理大小，用于处理大数据集
             
         返回:
-            (特征DataFrame, 目标变量DataFrame)元组
+            (特征DataFrame, 目标变量DataFrame)元组 - 仅在处理成功时返回，否则返回 (None, None)
         """
-        # 构建文件路径
+        # 构建文件路径 - 优先尝试Parquet，然后是压缩CSV，最后是普通CSV
+        possible_filenames = [
+            f"{symbol}_{timeframe}.parquet",
+            f"{symbol}_{timeframe}.csv.gz",
+            f"{symbol}_{timeframe}.csv"
+        ]
         if start_date and end_date:
-            filename = f"{symbol}_{timeframe}_{start_date.replace('-', '')}_{end_date.replace('-', '')}.csv"
-        else:
-            filename = f"{symbol}_{timeframe}.csv"
-            
-        filepath = os.path.join(data_dir, filename)
+            date_str = f"_{start_date.replace('-', '')}_{end_date.replace('-', '')}"
+            possible_filenames = [
+                f"{symbol}_{timeframe}{date_str}.parquet",
+                f"{symbol}_{timeframe}{date_str}.csv.gz",
+                f"{symbol}_{timeframe}{date_str}.csv"
+            ] + possible_filenames # 也检查没有日期的文件名
+
+        filepath = None
+        for fname in possible_filenames:
+            fpath = os.path.join(data_dir, fname)
+            if os.path.exists(fpath):
+                filepath = fpath
+                logger.info(f"找到数据文件: {filepath}")
+                break
         
         # 检查文件是否存在
-        if not os.path.exists(filepath):
-            logger.warning(f"找不到文件: {filepath}")
+        if filepath is None:
+            logger.warning(f"在 {data_dir} 中找不到 {symbol} {timeframe} 的数据文件 (尝试了 {possible_filenames})")
             return None, None
         
         try:
-            # 文件大小检查（如果超过100MB，使用分块读取）
-            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-            use_chunking = file_size_mb > 100 or batch_size is not None
-            
-            # 加载数据
-            df = None
-            
-            if use_chunking:
-                logger.info(f"文件 {filepath} 较大 ({file_size_mb:.1f}MB)，使用分块读取")
-                
-                # 首先读取文件头来获取列名
-                header_df = pd.read_csv(filepath, nrows=0)
-                column_names = header_df.columns.tolist()
-                
-                # 确保时间戳列存在
-                if 'timestamp' not in column_names:
-                    logger.warning(f"文件 {filepath} 中没有timestamp列")
-                    return None, None
-                
-                # 确定读取数据的批次大小
-                if batch_size is None:
-                    batch_size = 100000  # 默认批次大小
-                
-                # 计算文件的行数 (需要一次遍历)
-                with open(filepath, 'r') as f:
-                    total_rows = sum(1 for _ in f) - 1  # 减去标题行
-                
-                logger.info(f"数据大小为 {total_rows} 行，启用批处理 (每批 {batch_size} 行)")
-                
+            all_features_chunks = []
+            all_targets_chunks = []
+            processed_rows = 0
+
+            # 根据是否提供 batch_size 决定处理方式
+            if batch_size and batch_size > 0 and filepath.endswith(('.csv', '.csv.gz')): # 分块仅对CSV有效
+                logger.info(f"使用批处理模式，批次大小: {batch_size}")
                 try:
-                    # 直接读取整个文件，然后分批处理
-                    logger.info("读取整个文件，然后分批处理...")
-                    df = pd.read_csv(filepath)
-                except Exception as load_e:
-                    logger.error(f"读取文件 {filepath} 时出错: {str(load_e)}")
+                    # 使用 chunksize 读取
+                    reader = pd.read_csv(filepath, chunksize=batch_size)
+                    # 估算总块数 (如果需要进度条)，这可能需要再次读取或预先计算行数
+                    # total_chunks = sum(1 for _ in pd.read_csv(filepath, chunksize=batch_size)) # 避免重复读取，可以省略或用其他方式估算
+
+                    # for i, chunk_df in enumerate(tqdm(reader, desc=f"处理 {symbol} {timeframe} 块")):
+                    for i, chunk_df in enumerate(reader):
+                        logger.debug(f"处理块 {i+1}...")
+                        # 设置时间戳索引
+                        if 'timestamp' in chunk_df.columns:
+                            try:
+                                chunk_df['timestamp'] = pd.to_datetime(chunk_df['timestamp'])
+                                chunk_df.set_index('timestamp', inplace=True)
+                            except Exception as ts_err:
+                                logger.warning(f"块 {i+1} 时间戳处理失败: {ts_err}, 跳过此块")
+                                continue
+                        else:
+                            logger.warning(f"块 {i+1} 中缺少 'timestamp' 列, 跳过此块")
+                            continue
+                        
+                        # --- 块内处理 --- 
+                        features_chunk = None
+                        targets_chunk = None
+                        try:
+                            features_chunk = self.compute_features(chunk_df)
+                            if features_chunk is not None and not features_chunk.empty:
+                                targets_chunk = self.create_target_variables(features_chunk)
+                                if targets_chunk is not None and not targets_chunk.empty:
+                                     features_chunk = self.preprocess_features(features_chunk)
+                                     if features_chunk is None or features_chunk.empty: # 检查预处理是否成功
+                                         logger.warning(f"块 {i+1} 预处理失败")
+                                         features_chunk = None # 预处理失败则标记失败
+                                         targets_chunk = None
+                                else:
+                                    logger.warning(f"块 {i+1} 创建目标变量失败")
+                                    features_chunk = None # 标记失败
+                            else:
+                                logger.warning(f"块 {i+1} 计算特征失败")
+                                features_chunk = None # 标记失败 (确保在所有失败路径都标记)
+                        except Exception as chunk_proc_e:
+                            logger.error(f"处理块 {i+1} 时出错: {chunk_proc_e}")
+                            features_chunk = None # 标记失败
+                        # ---------------
+
+                        if features_chunk is not None and targets_chunk is not None and not features_chunk.empty:
+                            processed_rows += len(chunk_df)
+                            all_features_chunks.append(features_chunk.reset_index())
+                            all_targets_chunks.append(targets_chunk.reset_index())
+                    if not all_features_chunks or not all_targets_chunks:
+                        logger.error(f"处理 {symbol} {timeframe} 时所有块都处理失败")
+                        return None, None
+                    
+                    # 合并所有处理过的块
+                    logger.info("合并所有处理过的块...")
+                    features_df = pd.concat(all_features_chunks, ignore_index=True)
+                    targets_df = pd.concat(all_targets_chunks, ignore_index=True)
+                    logger.info(f"合并完成，总共处理 {processed_rows} 行")
+
+                except Exception as batch_e:
+                    logger.error(f"批处理 {filepath} 时出错: {str(batch_e)}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
                     return None, None
             else:
-                # 对于较小的文件，直接读取
-                try:
-                    df = pd.read_csv(filepath)
-                except Exception as load_e:
-                    logger.error(f"读取文件 {filepath} 时出错: {str(load_e)}")
+                # 不分批处理 (或输入是 Parquet)
+                if filepath.endswith('.parquet'):
+                    logger.info(f"加载 Parquet 文件 {filepath} 进行处理...")
+                else:
+                    logger.info(f"加载整个 CSV 文件 {filepath} 进行处理...")
+                df = self.load_data(filepath)
+                if df is None or df.empty:
+                    logger.warning(f"文件 {filepath} 数据为空或加载失败")
                     return None, None
-            
-            # 确保数据加载成功
-            if df is None or df.empty:
-                logger.warning(f"文件 {filepath} 数据为空或加载失败")
-                return None, None
                 
-            # 设置时间戳为索引
-            if 'timestamp' in df.columns:
-                df.set_index('timestamp', inplace=True)
-            
-            # 初始化变量
-            features_df = None
-            targets_df = None
-            
-            # 整体异常处理
-            try:
-                # 分批处理特征计算
-                logger.info(f"开始计算 {symbol} {timeframe} 特征...")
+                # --- 整体处理 ---
+                features_df = None
+                targets_df = None
                 try:
+                    logger.info(f"开始计算 {symbol} {timeframe} 特征 (整体处理)...")
                     features_df = self.compute_features(df)
-                    if features_df is None or features_df.empty:
-                        logger.warning(f"计算 {symbol} {timeframe} 特征失败，返回空DataFrame")
-                        return None, None
-                except Exception as feature_e:
-                    logger.error(f"计算 {symbol} {timeframe} 特征时出错: {str(feature_e)}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
+                    if features_df is not None and not features_df.empty:
+                        logger.info(f"开始为 {symbol} {timeframe} 创建目标变量 (整体处理)...")
+                        targets_df = self.create_target_variables(features_df)
+                        if targets_df is not None and not targets_df.empty:
+                            logger.info(f"开始为 {symbol} {timeframe} 预处理特征 (整体处理)...")
+                            features_df = self.preprocess_features(features_df)
+                            if features_df is None or features_df.empty:
+                                logger.warning(f"为 {symbol} {timeframe} 预处理特征失败")
+                                targets_df = None # 如果预处理失败，目标也无效了
+                        else:
+                            logger.warning(f"为 {symbol} {timeframe} 创建目标变量失败")
+                            features_df = None # 如果目标失败，特征也没用了
+                    else:
+                        logger.warning(f"计算 {symbol} {timeframe} 特征失败")
+                        features_df = None # 确保失败时 features_df 为 None
+                except Exception as proc_e:
+                    logger.error(f"整体处理 {symbol} {timeframe} 时出错: {proc_e}")
+                    features_df = None
+                    targets_df = None
+                # --------------
+
+                if features_df is None or targets_df is None:
+                    logger.error(f"整体处理 {symbol} {timeframe} 失败")
                     return None, None
-                
-                # 创建目标变量
-                logger.info(f"开始为 {symbol} {timeframe} 创建目标变量...")
-                try:
-                    targets_df = self.create_target_variables(features_df)
-                    if targets_df is None or targets_df.empty:
-                        logger.warning(f"为 {symbol} {timeframe} 创建目标变量失败，返回空DataFrame")
-                        return None, None
-                except Exception as target_e:
-                    logger.error(f"为 {symbol} {timeframe} 创建目标变量时出错: {str(target_e)}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    return None, None
-                
-                # 预处理特征
-                logger.info(f"开始为 {symbol} {timeframe} 预处理特征...")
-                try:
-                    features_df = self.preprocess_features(features_df)
-                    if features_df is None or features_df.empty:
-                        logger.warning(f"为 {symbol} {timeframe} 预处理特征失败，返回空DataFrame")
-                        return None, None
-                except Exception as preprocess_e:
-                    logger.error(f"为 {symbol} {timeframe} 预处理特征时出错: {str(preprocess_e)}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    return None, None
-                
-            except Exception as general_e:
-                logger.error(f"处理 {filepath} 总体流程出错: {str(general_e)}")
-                import traceback
-                logger.debug(traceback.format_exc())
-                return None, None
+
+            # --- 保存为 Parquet ---
+            output_dir = os.path.join(self.features_path, symbol)
+            os.makedirs(output_dir, exist_ok=True)
             
-            # 检查处理是否成功
-            if features_df is None or targets_df is None:
-                logger.warning(f"处理 {filepath} 失败，特征或目标变量为空")
-                return None, None
+            features_file_parquet = os.path.join(output_dir, f"features_{timeframe}.parquet")
+            targets_file_parquet = os.path.join(output_dir, f"targets_{timeframe}.parquet")
             
-            # 将时间戳设为列而非索引，方便后续处理
             try:
-                if isinstance(features_df.index, pd.DatetimeIndex) or features_df.index.name == 'timestamp':
-                    features_df.reset_index(inplace=True)
-                
-                if isinstance(targets_df.index, pd.DatetimeIndex) or targets_df.index.name == 'timestamp':
-                    targets_df.reset_index(inplace=True)
-            except Exception as reset_e:
-                logger.error(f"重置索引时出错: {str(reset_e)}")
-                # 尝试恢复处理
+                # 尝试优化数据类型
+                features_df = features_df.infer_objects() # 推断最佳类型
+                for col in features_df.select_dtypes(include=['float64']).columns:
+                    features_df[col] = features_df[col].astype('float32')
+                for col in features_df.select_dtypes(include=['int64', 'int32', 'int16', 'int8']).columns: # 检查所有整数类型
+                    if pd.api.types.is_numeric_dtype(features_df[col]): 
+                        min_val = features_df[col].min()
+                        max_val = features_df[col].max()
+                        if pd.notna(min_val) and pd.notna(max_val): # 确保有有效值
+                            # 检查是否可以降级为更小的整数类型
+                            if min_val >= np.iinfo(np.int8).min and max_val <= np.iinfo(np.int8).max:
+                                features_df[col] = features_df[col].astype('int8')
+                            elif min_val >= np.iinfo(np.int16).min and max_val <= np.iinfo(np.int16).max:
+                                features_df[col] = features_df[col].astype('int16')
+                            elif min_val >= np.iinfo(np.int32).min and max_val <= np.iinfo(np.int32).max:
+                                features_df[col] = features_df[col].astype('int32')
+                        # else: 保持原有的int64或其他较大整数类型
+                        # else: # 如果列中存在NaN（即使理论上不应该在整数列），无法直接转换
+                            pass # 明确添加 pass 来处理这个 else 分支
+
+                targets_df = targets_df.infer_objects()
+                for col in targets_df.select_dtypes(include=['float64']).columns:
+                    targets_df[col] = targets_df[col].astype('float32')
+
+                # 保存为 Parquet (使用 gzip 压缩)
+                features_df.to_parquet(features_file_parquet, index=False, compression='gzip')
+                targets_df.to_parquet(targets_file_parquet, index=False, compression='gzip')
+                logger.info(f"已处理 {symbol} {timeframe} 数据并保存为 Parquet 至 {output_dir}")
+            except ImportError:
+                logger.error("需要安装 'pyarrow' 库才能保存为 Parquet 格式。请运行: pip install pyarrow")
+                # 回退到保存为 CSV (如果需要)
+                features_file_csv = os.path.join(output_dir, f"features_{timeframe}.csv.gz")
+                targets_file_csv = os.path.join(output_dir, f"targets_{timeframe}.csv.gz")
                 try:
-                    features_df = features_df.reset_index()
-                    targets_df = targets_df.reset_index()
-                except:
-                    pass
-            
-            # 创建输出目录
-            try:
-                output_dir = os.path.join(self.features_path, symbol)
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # 保存特征和目标变量
-                features_file = os.path.join(output_dir, f"features_{timeframe}.csv")
-                targets_file = os.path.join(output_dir, f"targets_{timeframe}.csv")
-                
-                features_df.to_csv(features_file, index=False)
-                targets_df.to_csv(targets_file, index=False)
-                
-                logger.info(f"已处理 {symbol} {timeframe} 数据并保存至 {output_dir}")
+                    features_df.to_csv(features_file_csv, index=False, compression='gzip')
+                    targets_df.to_csv(targets_file_csv, index=False, compression='gzip')
+                    logger.info(f"已回退保存为压缩 CSV (.gz) 至 {output_dir}")
+                except Exception as csv_save_e:
+                    logger.error(f"回退保存为 CSV 时也出错: {str(csv_save_e)}")
+                    # 保存失败，但处理可能已完成
+                    return features_df, targets_df
             except Exception as save_e:
-                logger.error(f"保存结果到 {output_dir} 时出错: {str(save_e)}")
-                # 即使保存失败，也返回结果
+                logger.error(f"保存结果为 Parquet 时出错: {str(save_e)}")
+                # 保存失败，但处理可能已完成
+                return features_df, targets_df # 或者返回 None, None 表示保存失败？ \
             
+            # 如果保存成功，返回处理好的DataFrame (虽然 process_all_data 不再使用它们)
             return features_df, targets_df
             
         except Exception as e:
-            logger.error(f"处理 {filepath} 时出错: {str(e)}")
+            logger.error(f"处理 {filepath} 时发生意外错误: {str(e)}")
             import traceback
             logger.debug(traceback.format_exc())
             return None, None
@@ -881,46 +933,59 @@ class FeatureEngineer:
             batch_size: 批处理大小，用于处理大数据集
             
         返回:
-            处理后的数据字典 {symbol: {timeframe: (features_df, targets_df)}}
+            处理后的数据字典 {symbol: {timeframe: (features_df, targets_df)}} -- 注意：实际不再返回数据，直接保存文件
         """
         # 如果未指定交易对和时间框架，从数据目录自动检测
         if symbols is None or timeframes is None:
-            available_files = os.listdir(data_dir)
-            data_files = [f for f in available_files if f.endswith('.csv')]
-            
-            if not data_files:
-                logger.warning(f"在目录 {data_dir} 中未找到任何CSV文件")
-                return {}
-            
-            # 从文件名中提取交易对和时间框架
-            if symbols is None:
-                detected_symbols = set()
-                for filename in data_files:
-                    parts = filename.split('_')
-                    if len(parts) >= 2:
-                        detected_symbols.add(parts[0])
-                symbols = list(detected_symbols)
-            
-            if timeframes is None:
-                detected_timeframes = set()
-                for filename in data_files:
-                    parts = filename.split('_')
-                    if len(parts) >= 2:
-                        detected_timeframes.add(parts[1])
-                timeframes = list(detected_timeframes)
-            
-            logger.info(f"检测到的交易对: {symbols}")
-            logger.info(f"检测到的时间框架: {timeframes}")
+            try:
+                available_files = os.listdir(data_dir)
+                data_files = [f for f in available_files if f.endswith('.csv') or f.endswith('.parquet') or f.endswith('.csv.gz')]
+                
+                if not data_files:
+                    logger.warning(f"在目录 {data_dir} 中未找到任何数据文件")
+                    return {} # 返回空字典而不是None
+                
+                # 从文件名中提取交易对和时间框架
+                if symbols is None:
+                    detected_symbols = set()
+                    for filename in data_files:
+                        parts = filename.split('_')
+                        if len(parts) >= 2:
+                            detected_symbols.add(parts[0])
+                    symbols = list(detected_symbols)
+                
+                if timeframes is None:
+                    detected_timeframes = set()
+                    for filename in data_files:
+                        parts = filename.split('_')
+                        if len(parts) >= 2:
+                            # 假设时间框架是第二部分，移除文件扩展名
+                            tf_part = os.path.splitext(parts[1])[0]
+                            if tf_part.endswith('.csv'): # 处理.csv.gz的情况
+                                tf_part = os.path.splitext(tf_part)[0]
+                            detected_timeframes.add(tf_part)
+                    timeframes = list(detected_timeframes)
+                
+                logger.info(f"检测到的交易对: {symbols}")
+                logger.info(f"检测到的时间框架: {timeframes}")
+            except FileNotFoundError:
+                 logger.error(f"数据目录 {data_dir} 不存在")
+                 return {}
+            except Exception as detect_e:
+                 logger.error(f"检测交易对和时间框架时出错: {detect_e}")
+                 return {}
         
-        results = {}
+        # 记录处理结果，但不存储数据
+        processed_count = 0
+        failed_items = []
         
         # 处理所有交易对和时间框架的组合
         for symbol in tqdm(symbols, desc="处理交易对"):
-            results[symbol] = {}
-            
+            symbol_processed = False
             for timeframe in timeframes:
                 logger.info(f"处理 {symbol} {timeframe} 数据...")
                 
+                # 调用处理单个文件的方法，它现在负责保存
                 features_df, targets_df = self.process_data_for_symbol(
                     symbol=symbol,
                     timeframe=timeframe,
@@ -931,9 +996,17 @@ class FeatureEngineer:
                 )
                 
                 if features_df is not None and targets_df is not None:
-                    results[symbol][timeframe] = (features_df, targets_df)
-                    logger.info(f"成功处理 {symbol} {timeframe} 数据: {len(features_df)} 行")
+                    logger.info(f"成功处理 {symbol} {timeframe} 数据")
+                    symbol_processed = True
                 else:
                     logger.warning(f"未能处理 {symbol} {timeframe} 数据")
+                    failed_items.append(f"{symbol}_{timeframe}")
+            
+            if symbol_processed:
+                processed_count += 1
+
+        if failed_items:
+            logger.warning(f"以下项目处理失败: {', '.join(failed_items)}")
         
-        return results 
+        # 返回已处理交易对的数量，而不是整个数据集
+        return processed_count 
