@@ -45,6 +45,7 @@ def match_shape(a, b):
         else:
              raise ValueError(f"match_shape: Cannot unambiguously match shape {a_shape} with {b_shape}")
 
+
     # Case 3: 1D vs 1D (different lengths) - usually an error unless broadcasting is intended
     if a_dim == 1 and b_dim == 1:
          # Allow broadcasting if one dimension is 1, otherwise it's likely an error
@@ -410,6 +411,7 @@ class PyTorchTechnicalIndicators:
                     result_tensors[col_name] = cv
                     
                     # 计算标准化波动率 = std/price
+                    logger.debug(f"Volatility: Before match_shape for norm_vol - close shape: {close.shape}, rolling_std shape: {rolling_std.shape}")
                     close_expanded = match_shape(close, rolling_std)
                     non_zero_mask = close_expanded != 0
                     norm_vol = torch.zeros_like(rolling_std)
@@ -454,6 +456,7 @@ class PyTorchTechnicalIndicators:
                         result_tensors[col_name] = atr
                         
                         # 计算标准化ATR
+                        logger.debug(f"Volatility: Before match_shape for norm_atr - close shape: {close.shape}, atr shape: {atr.shape}")
                         non_zero_mask = close != 0
                         close_expanded = match_shape(close, atr)
                         mask = non_zero_mask & ~torch.isnan(atr)
@@ -510,6 +513,7 @@ class PyTorchTechnicalIndicators:
                     result_tensors[col_name] = sma
                     
                     # 计算价格相对于移动平均线的百分比变化
+                    logger.debug(f"Trend: Before match_shape for close_to_ma - close shape: {close.shape}, sma shape: {sma.shape}")
                     non_zero_mask = sma != 0
                     close_expanded = match_shape(close, sma)
                     close_to_ma = torch.zeros_like(sma)
@@ -551,7 +555,9 @@ class PyTorchTechnicalIndicators:
                         price_range = rolling_max - rolling_min
                         non_zero_range = price_range > 0
                         ppo = torch.zeros_like(close)
+                        logger.debug(f"Trend: Before match_shape for ppo - close shape: {close.shape}, rolling_min shape: {rolling_min.shape}")
                         close_expanded = match_shape(close, rolling_min)
+                        logger.debug(f"Trend: Before match_shape for ppo - rolling_min shape: {rolling_min.shape}, close shape: {close.shape}")
                         min_expanded = match_shape(rolling_min, close)
                         ppo[non_zero_range] = (close_expanded[non_zero_range] - min_expanded[non_zero_range]) / price_range[non_zero_range]
                         
