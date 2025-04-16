@@ -23,7 +23,7 @@ import lightgbm as lgb
 from datetime import datetime
 
 from src.utils.logger import get_logger
-from src.models.model_factory import ModelFactory
+from src.models.model_training import prepare_train_test_data
 
 logger = get_logger(__name__)
 
@@ -680,17 +680,16 @@ def parse_args():
                       help="交易对符号，多个符号用逗号分隔")
     parser.add_argument("--timeframe", type=str, default="1h",
                       help="时间框架")
-    parser.add_argument("--target_type", type=str, default="price_change_pct",
-                      help="目标类型")
-    parser.add_argument("--horizon", type=int, default=60,
-                      help="预测时间范围")
     parser.add_argument("--features", type=str, nargs='+',
                       help="使用的特征列表，如果不指定则使用所有可用特征")
     parser.add_argument("--selection_method", type=str, default="consensus",
                       help="最终特征选择方法 (consensus, model, mutual_info, permutation, rfe, rfecv)")
     parser.add_argument("--min_count", type=int, default=2,
                       help="使用consensus方法时，至少在多少种方法中被选为重要的阈值")
-    
+    parser.add_argument("--feature_file", type=str, default=None, help="Path to the feature file (e.g., features_1m.parquet)")
+    parser.add_argument("--target_file", type=str, default=None, help="Path to the target file (e.g., targets_1m.parquet)")
+    parser.add_argument("--target_column", type=str, default=None, help="Name of the target column in the target file")
+
     return parser.parse_args()
 
 def main():
@@ -715,68 +714,177 @@ def main():
         plot_results=not args.no_plot
     )
     
-    # 加载数据
-    from src.data.data_loader import DataLoader
-    
-    symbols = args.symbols.split(",")
-    
-    data_loader = DataLoader(
-        data_dir=args.data_dir,
-        symbols=symbols,
-        timeframes=[args.timeframe],
-        target_type=args.target_type,
-        target_horizon=args.horizon
-    )
-    
-    # 获取特征和目标数据
-    X_train, y_train, X_test, y_test = data_loader.load_train_test_data(test_size=0.2)
-    
-    if X_train is None or y_train is None:
-        logger.error("加载数据失败")
+    # Determine file paths
+    if args.feature_file is None:
+        # Construct path based on convention if not provided
+        # Use args.symbols and args.timeframe if needed for path, but ensure they are parsed correctly
+        if args.symbols and args.timeframe:
+             # Example convention: data/processed/BTCUSDT/features_1m.parquet
+             # Adjust this logic based on your actual file structure if different
+             # For simplicity, let's assume a flat structure in data_dir for now
+             args.feature_file = os.path.join(args.data_dir, f"features_{args.timeframe}.parquet")
+        else:
+             logger.error("Feature file path not specified and cannot be inferred without symbol and timeframe.")
+             return # Or raise error
+
+    if args.target_file is None:
+        if args.symbols and args.timeframe:
+             args.target_file = os.path.join(args.data_dir, f"targets_{args.timeframe}.parquet")
+        else:
+             logger.error("Target file path not specified and cannot be inferred without symbol and timeframe.")
+             return # Or raise error
+
+
+    logger.info(f"加载特征文件: {args.feature_file}")
+    logger.info(f"加载目标文件: {args.target_file}")
+
+    try:
+        X = pd.read_parquet(args.feature_file)
+        y_df = pd.read_parquet(args.target_file)
+
+        # Ensure index is DatetimeIndex for alignment and splitting
+        if not isinstance(X.index, pd.DatetimeIndex):
+            try:
+                X.index = pd.to_datetime(X.index)
+            except Exception as e:
+                logger.error(f"无法将特征文件索引转换为 DatetimeIndex: {e}")
+                return
+        if not isinstance(y_df.index, pd.DatetimeIndex):
+             try:
+                 y_df.index = pd.to_datetime(y_df.index)
+             except Exception as e:
+                 logger.error(f"无法将目标文件索引转换为 DatetimeIndex: {e}")
+                 return
+
+        # Infer or use specified target column
+        if args.target_column:
+            target_col = args.target_column
+        elif len(y_df.columns) == 1:
+            target_col = y_df.columns[0]
+        else:
+            # Try to find a column starting with 'target_'
+            target_cols = [col for col in y_df.columns if col.startswith('target_')]
+            if not target_cols:
+                 # Try finding columns based on prediction horizon from args if available
+                 # This part might need adjustment based on actual target naming convention
+                 # For now, raise error if ambiguous
+                 raise ValueError(f"在目标文件 {args.target_file} 中找不到目标列，请使用 --target_column 指定")
+
+            target_col = target_cols[0] # Assume first target column found
+            logger.info(f"自动检测到目标列: {target_col}")
+
+        if target_col not in y_df.columns:
+             raise ValueError(f"目标列 '{target_col}' 在文件 {args.target_file} 中不存在")
+
+        y = y_df[target_col]
+
+        # Align data - crucial step
+        X, y = X.align(y, join='inner', axis=0)
+
+        # Handle potential NaNs introduced by alignment or previous steps
+        initial_len = len(X)
+        # Check for infinite values as well
+        X = X.replace([np.inf, -np.inf], np.nan)
+        y = y.replace([np.inf, -np.inf], np.nan)
+
+        valid_mask = ~y.isna() & ~X.isna().any(axis=1)
+        X = X[valid_mask]
+        y = y[valid_mask]
+        dropped_count = initial_len - len(X)
+        if dropped_count > 0:
+            logger.warning(f"因对齐或 NaN 值移除了 {dropped_count} 条记录")
+
+
+        if X.empty or y.empty:
+             raise ValueError("对齐或清理 NaN 后数据为空")
+
+    except FileNotFoundError as e:
+        logger.error(f"找不到数据文件: {e}")
         return
-    
+    except Exception as e:
+        logger.error(f"加载或处理数据时出错: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return
+
+    # Prepare train/test data using the imported function
+    # Note: Test set might not be strictly needed for importance analysis itself
+    # Validation set is useful for permutation importance / RFE with early stopping
+    X_train, y_train, X_test, y_test, X_val, y_val = prepare_train_test_data(
+        X, y,
+        test_size=0.2,       # Default test size, consider making configurable
+        validation_size=0.1, # Default validation size, consider making configurable
+        time_series_split=True # Default to time series split
+    )
+
+    if X_train is None or y_train is None:
+        logger.error("数据分割失败，训练集为空")
+        return
+
     # 如果指定了特定特征，则仅使用这些特征
     if args.features:
-        # 检查指定的特征是否存在于数据中
-        missing_features = [f for f in args.features if f not in X_train.columns]
+        # Check if specified features exist in the data
+        available_cols = X_train.columns.tolist()
+        missing_features = [f for f in args.features if f not in available_cols]
         if missing_features:
             logger.warning(f"以下特征不存在于数据中: {missing_features}")
-            args.features = [f for f in args.features if f in X_train.columns]
-            
+            # Filter the list of features to use only available ones
+            args.features = [f for f in args.features if f in available_cols]
+
         if not args.features:
-            logger.error("没有可用的特征")
+            logger.error("指定的特征列表为空或所有特征均不可用")
             return
-            
+
+        logger.info(f"仅使用指定的 {len(args.features)} 个特征进行分析")
         X_train = X_train[args.features]
-        if X_test is not None:
-            X_test = X_test[args.features]
-    
-    logger.info(f"加载数据完成，训练集形状: X={X_train.shape}, y={y_train.shape}")
+        # Apply feature selection to validation set as well if it exists
+        if X_val is not None:
+             # Ensure validation set columns exist before indexing
+             val_available_cols = [f for f in args.features if f in X_val.columns]
+             if len(val_available_cols) != len(args.features):
+                  missing_in_val = set(args.features) - set(val_available_cols)
+                  logger.warning(f"以下指定特征在验证集中缺失: {list(missing_in_val)}")
+             if not val_available_cols:
+                  logger.error("验证集中没有可用的指定特征")
+                  X_val = None # Or handle differently
+             else:
+                  X_val = X_val[val_available_cols]
+
+
+    logger.info(f"数据加载和分割完成，训练集形状: X={X_train.shape}, y={y_train.shape}")
+    if X_val is not None:
+        logger.info(f"验证集形状: X={X_val.shape}, y={y_val.shape}")
     if X_test is not None:
         logger.info(f"测试集形状: X={X_test.shape}, y={y_test.shape}")
-    
+
+
     # 分析特征重要性
+    # Pass X_train, y_train. Validation data might be used internally by some methods.
     analyzer.analyze_feature_importance(X_train, y_train)
-    
+
     # 选择特征
     selected_features = analyzer.select_features(
-        X_train, 
+        X_train,
         method=args.selection_method,
         min_count=args.min_count
     )
-    
+
     if selected_features:
         logger.info(f"选择了 {len(selected_features)} 个特征: {selected_features}")
-        
+
         # 保存选择的特征
+        # Ensure output directory exists
+        os.makedirs(args.output_dir, exist_ok=True)
         selection_path = os.path.join(args.output_dir, f"final_selected_features_{args.selection_method}.json")
-        with open(selection_path, 'w') as f:
-            json.dump(selected_features, f, indent=2)
-            
-        logger.info(f"已保存最终选择的特征: {selection_path}")
+        try:
+            with open(selection_path, 'w') as f:
+                json.dump(selected_features, f, indent=2)
+            logger.info(f"已保存最终选择的特征: {selection_path}")
+        except Exception as e:
+            logger.error(f"保存选择的特征时出错: {e}")
     else:
         logger.warning("没有选择任何特征")
-    
+
     logger.info("特征重要性分析完成")
 
 if __name__ == "__main__":
