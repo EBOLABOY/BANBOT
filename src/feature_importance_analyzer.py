@@ -821,6 +821,33 @@ def main():
         logger.error("数据分割失败，训练集为空")
         return
 
+    # --- Added: Select only numeric columns for model training ---
+    numeric_cols_train = X_train.select_dtypes(include=np.number).columns.tolist()
+    original_cols_train = X_train.columns.tolist()
+    non_numeric_cols_train = [col for col in original_cols_train if col not in numeric_cols_train]
+
+    if non_numeric_cols_train:
+        logger.warning(f"从训练特征集中移除以下非数值列: {non_numeric_cols_train}")
+        X_train = X_train[numeric_cols_train]
+
+    if X_val is not None:
+        numeric_cols_val = X_val.select_dtypes(include=np.number).columns.tolist()
+        original_cols_val = X_val.columns.tolist()
+        non_numeric_cols_val = [col for col in original_cols_val if col not in numeric_cols_val]
+        if non_numeric_cols_val:
+             logger.warning(f"从验证特征集中移除以下非数值列: {non_numeric_cols_val}")
+             X_val = X_val[numeric_cols_val]
+             # Re-align val features in case user specified a subset via --features
+             if args.features:
+                 # Use the already filtered args.features list
+                 val_available_cols = [f for f in args.features if f in X_val.columns]
+                 X_val = X_val[val_available_cols]
+
+    if X_train.empty:
+         logger.error("在移除非数值列后，训练特征集为空。")
+         return
+    # --- End of Added Section ---
+
     # 如果指定了特定特征，则仅使用这些特征
     if args.features:
         # Check if specified features exist in the data
