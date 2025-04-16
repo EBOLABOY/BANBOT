@@ -894,3 +894,71 @@ class CNNLSTMModel(DeepLearningModel):
             model.add(Dense(1, activation='linear'))
         
         return model 
+
+
+def create_deep_learning_model(
+    model_type: str,
+    target_type: str,
+    model_params: Dict = None,
+    prediction_horizon: int = 1,
+    input_sequence_length: int = 10,
+    name: Optional[str] = None,
+    model_dir: str = "models/saved_models"
+) -> DeepLearningModel:
+    """
+    创建深度学习模型实例
+
+    参数:
+        model_type (str): 模型类型，如 "lstm", "gru", "simple_rnn", "cnn_lstm"
+        target_type (str): 目标变量类型
+        model_params (Dict): 模型特定参数
+        prediction_horizon (int): 预测周期
+        input_sequence_length (int): 输入序列长度
+        name (str, optional): 模型名称
+        model_dir (str): 模型保存目录
+
+    返回:
+        DeepLearningModel: 深度学习模型实例
+    """
+    logger.info(f"Creating deep learning model: {model_type}")
+    model_type = model_type.lower()
+
+    if model_type == "lstm":
+        return LSTMModel(
+            name=name or "lstm_model",
+            model_params=model_params,
+            prediction_horizon=prediction_horizon,
+            target_type=target_type,
+            input_sequence_length=input_sequence_length,
+            model_dir=model_dir
+        )
+    elif model_type == "gru":
+        return GRUModel(
+            name=name or "gru_model",
+            model_params=model_params,
+            prediction_horizon=prediction_horizon,
+            target_type=target_type,
+            input_sequence_length=input_sequence_length,
+            model_dir=model_dir
+        )
+    elif model_type == "simple_rnn":
+        return SimpleRNNModel(
+            name=name or "simple_rnn_model",
+            model_params=model_params,
+            prediction_horizon=prediction_horizon,
+            target_type=target_type,
+            input_sequence_length=input_sequence_length,
+            model_dir=model_dir
+        )
+    elif model_type == "cnn_lstm":
+        return CNNLSTMModel(
+            name=name or "cnn_lstm_model",
+            model_params=model_params,
+            prediction_horizon=prediction_horizon,
+            target_type=target_type,
+            input_sequence_length=input_sequence_length,
+            model_dir=model_dir
+        )
+    # 在这里可以添加其他深度学习模型的创建逻辑
+    else:
+        raise ValueError(f"Unsupported deep learning model type: {model_type}") 
