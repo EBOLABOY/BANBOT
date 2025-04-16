@@ -84,48 +84,29 @@ class FeatureImportanceAnalyzer:
                 
     def create_model(self) -> Any:
         """
-        根据指定的模型类型创建模型
-        
+        根据指定的模型类型创建模型 (仅 CPU)
+
         返回:
             创建的模型实例
         """
         if self.model_type == "xgboost":
-            logger.info("创建 XGBoost 模型 (尝试使用 GPU)")
-            try:
-                # 添加 tree_method='hist' 和 device='cuda' 来启用 GPU
-                return xgb.XGBRegressor(
-                    n_estimators=self.n_estimators,
-                    random_state=self.random_state,
-                    n_jobs=self.n_jobs,
-                    tree_method='hist', # Necessary for GPU
-                    device='cuda'       # Specify GPU device
-                )
-            except Exception as e:
-                 logger.warning(f"创建 XGBoost GPU 模型失败，回退到 CPU: {e}")
-                 # Fallback to CPU if GPU fails
-                 return xgb.XGBRegressor(
-                     n_estimators=self.n_estimators,
-                     random_state=self.random_state,
-                     n_jobs=self.n_jobs
-                 )
+            logger.info("创建 XGBoost 模型 (CPU)")
+            # Standard CPU XGBRegressor
+            return xgb.XGBRegressor(
+                n_estimators=self.n_estimators,
+                random_state=self.random_state,
+                n_jobs=self.n_jobs
+                # Removed tree_method and device parameters
+            )
         elif self.model_type == "lightgbm":
-            logger.info("创建 LightGBM 模型 (尝试使用 GPU)")
-            try:
-                # 添加 device='gpu' 来启用 GPU
-                return lgb.LGBMRegressor(
-                    n_estimators=self.n_estimators,
-                    random_state=self.random_state,
-                    n_jobs=self.n_jobs,
-                    device='gpu' # Specify GPU device
-                )
-            except Exception as e:
-                 logger.warning(f"创建 LightGBM GPU 模型失败，回退到 CPU: {e}")
-                 # Fallback to CPU if GPU fails
-                 return lgb.LGBMRegressor(
-                     n_estimators=self.n_estimators,
-                     random_state=self.random_state,
-                     n_jobs=self.n_jobs
-                 )
+            logger.info("创建 LightGBM 模型 (CPU)")
+            # Standard CPU LGBMRegressor
+            return lgb.LGBMRegressor(
+                n_estimators=self.n_estimators,
+                random_state=self.random_state,
+                n_jobs=self.n_jobs
+                # Removed device parameter
+            )
         elif self.model_type == "random_forest":
             # RandomForest in scikit-learn doesn't have a simple 'device' parameter for GPU
             logger.info("创建 RandomForest 模型 (CPU)")
