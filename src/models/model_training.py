@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 def load_data(feature_path: str, target_path: str, target_column: str = None) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    加载特征和目标数据
+    加载特征和目标数据 (优先 Parquet, 兼容 CSV)
     
     参数:
         feature_path: 特征数据文件路径
@@ -35,28 +35,53 @@ def load_data(feature_path: str, target_path: str, target_column: str = None) ->
         Tuple[pd.DataFrame, pd.Series]: 特征DataFrame和目标Series
     """
     # 加载特征数据
-    features_df = pd.read_csv(feature_path, index_col=0, parse_dates=True)
+    try:
+        # 尝试读取 Parquet 文件
+        features_df = pd.read_parquet(feature_path)
+        logger.info(f"已从 Parquet 文件加载特征: {feature_path}")
+    except Exception as e_parquet:
+        logger.warning(f"无法将特征文件作为 Parquet 读取 ({e_parquet})，尝试作为 CSV 读取...")
+        try:
+            # 如果 Parquet 失败，尝试 CSV 作为后备
+            features_df = pd.read_csv(feature_path, index_col=0, parse_dates=True)
+            logger.info(f"已从 CSV 文件加载特征: {feature_path}")
+        except Exception as e_csv:
+            logger.error(f"无法将特征文件作为 Parquet 或 CSV 读取: {e_csv}")
+            raise FileNotFoundError(f"无法加载特征文件: {feature_path}") from e_csv
+    
+    # 加载目标数据
+    try:
+        # 尝试读取 Parquet 文件
+        targets_df = pd.read_parquet(target_path)
+        logger.info(f"已从 Parquet 文件加载目标: {target_path}")
+    except Exception as e_parquet:
+        logger.warning(f"无法将目标文件作为 Parquet 读取 ({e_parquet})，尝试作为 CSV 读取...")
+        try:
+            # 如果 Parquet 失败，尝试 CSV 作为后备
+            targets_df = pd.read_csv(target_path, index_col=0, parse_dates=True)
+            logger.info(f"已从 CSV 文件加载目标: {target_path}")
+        except Exception as e_csv:
+            logger.error(f"无法将目标文件作为 Parquet 或 CSV 读取: {e_csv}")
+            raise FileNotFoundError(f"无法加载目标文件: {target_path}") from e_csv
+    
+    # 确保索引是 DatetimeIndex
+    if not isinstance(features_df.index, pd.DatetimeIndex):
+        try:
+            features_df.index = pd.to_datetime(features_df.index)
+        except Exception as e:
+            logger.warning(f"无法自动将特征索引转换为 DatetimeIndex: {e}")
+            # Depending on requirements, you might want to raise an error here
+    if not isinstance(targets_df.index, pd.DatetimeIndex):
+        try:
+            targets_df.index = pd.to_datetime(targets_df.index)
+        except Exception as e:
+            logger.warning(f"无法自动将目标索引转换为 DatetimeIndex: {e}")
+            # Depending on requirements, you might want to raise an error here
     
     # 检查是否是跨周期特征（通过检查列名前缀）
     is_cross_timeframe = any('_' in col and col.split('_')[0] in ['1h', '4h', '1d', '1m', '5m', '15m'] for col in features_df.columns)
     if is_cross_timeframe:
         logger.info("检测到跨周期特征数据")
-    
-    # 加载目标数据
-    targets_df = pd.read_csv(target_path, index_col=0, parse_dates=True)
-    
-    # 如果未指定目标列名，则尝试自动检测
-    if target_column is None:
-        # 查找以'target_'开头的列
-        target_cols = [col for col in targets_df.columns if col.startswith('target_')]
-        if not target_cols:
-            raise ValueError(f"在目标文件{target_path}中找不到目标列（以'target_'开头的列）")
-        target_column = target_cols[0]
-        logger.info(f"自动选择目标列: {target_column}")
-    
-    # 检查目标列是否存在
-    if target_column not in targets_df.columns:
-        raise ValueError(f"在目标文件{target_path}中找不到列: {target_column}")
     
     # 确保索引对齐 - 处理时区和格式问题
     features_index = features_df.index
